@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export DISPLAY="${DISPLAY:-:1}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/oai-runtime}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+screen="${OAI_RUNTIME_SCREEN:-1280x800x24}"
+
+mkdir -p "$XDG_RUNTIME_DIR" /workspace "$HOME/.local/share" "${XDG_CONFIG_HOME:-$HOME/.local/share/config}" "$HOME/.cache"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+pids=()
+start() {
+  "$@" &
+  pids+=("$!")
+}
+
+cleanup() {
+  local pid
+  for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+dbus-daemon --session --fork --address="$DBUS_SESSION_BUS_ADDRESS" --nopidfile
+start Xvfb "$DISPLAY" -screen 0 "$screen" -nolisten tcp -ac
+
+for _ in $(seq 1 50); do
+  xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+xdpyinfo -display "$DISPLAY" >/dev/null 2>&1
+
+start xfwm4 --display="$DISPLAY" --replace
+start picom --backend xrender
+start x11vnc -display "$DISPLAY" -rfbport 5900 -localhost -forever -shared -nopw
+start websockify --web=/usr/share/novnc 6080 localhost:5900
+start codex exec-server --listen ws://0.0.0.0:4096 --concurrent-requests 16
+
+for _ in $(seq 1 100); do
+  if bash -c 'exec 3<>/dev/tcp/127.0.0.1/4096' 2>/dev/null; then break; fi
+  sleep 0.1
+done
+bash -c 'exec 3<>/dev/tcp/127.0.0.1/4096' 2>/dev/null
+
+touch /run/oai-runtime/ready
+/usr/local/bin/oai-runtime-doctor
+
+wait -n "${pids[@]}"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Chromium's Linux sandbox cannot initialize under the apps server's Docker
+# user-namespace/AppArmor policy. The container itself supplies the isolation:
+# non-root user, dropped capabilities, no-new-privileges, read-only rootfs, and
+# explicit persistent/ephemeral mounts.
+exec chromium \
+  --no-sandbox \
+  --user-data-dir="${XDG_CONFIG_HOME:-$HOME/.local/share/config}/chromium" \
+  "$@"

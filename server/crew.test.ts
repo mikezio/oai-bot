@@ -8,6 +8,7 @@ import { CrewOrchestrator } from "./crew.js";
 import { describeCodexActivity } from "./codex.js";
 import { isoNow, makeId, Store } from "./store.js";
 import type { AgentProfile, Room } from "./types.js";
+import type { RuntimeProvider } from "./runtime.js";
 
 class FakeCodex extends EventEmitter {
   calls: Array<{ prompt: string; instructions?: string; activeAtStart: number }> = [];
@@ -17,10 +18,16 @@ class FakeCodex extends EventEmitter {
   delayMs = 5;
   interrupts: Array<{ threadId: string; turnId: string }> = [];
   private pendingTurns = new Map<string, () => void>();
+  lastThreadId?: string;
 
   constructor(responses: string[] = []) { super(); this.responses = responses; }
   setDynamicToolHandler(handler: (request: any) => Promise<any>) { (this as any).dynamicToolHandler = handler; }
-  async startThread(options: { instructions?: string }) { (this as any).lastInstructions = options.instructions; return `thread-${Math.random()}`; }
+  async startThread(options: { instructions?: string; dynamicTools?: any[] }) {
+    (this as any).lastInstructions = options.instructions;
+    (this as any).lastDynamicTools = options.dynamicTools;
+    this.lastThreadId = `thread-${Math.random()}`;
+    return this.lastThreadId;
+  }
   async resumeThread() { return undefined; }
   async runTurn({ prompt, onStarted, onDelta }: { prompt: string; onStarted?: (turnId: string) => void; onDelta?: (delta: string) => void }) {
     const activeAtStart = this.active;
@@ -63,7 +70,7 @@ function makeAgent(name: string, title = ""): AgentProfile {
   return { id, name, title, description: `${name}'s user supplied description`, instructions: `${name}'s user supplied instructions`, avatar: name[0], color: "#7C5CFC", model: "gpt-5.6-luna", effort: "medium", networkAccess: true, privateWorkspacePath: `agent-workspaces/${id}`, status: "idle", roomThreadIds: {}, roomLastSeenMessageIds: {}, createdAt: timestamp, updatedAt: timestamp };
 }
 
-async function fixture(responses: string[] = []) {
+async function fixture(responses: string[] = [], runtime?: RuntimeProvider) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-bots-test-"));
   const store = new Store(path.join(directory, "state.json"));
   await store.load();
@@ -74,9 +81,35 @@ async function fixture(responses: string[] = []) {
   store.mutate((state) => { state.agents = agents; state.rooms = [group, direct]; });
   await store.flush();
   const codex = new FakeCodex(responses);
-  const crew = new CrewOrchestrator(store, codex as any, () => undefined);
+  const crew = new CrewOrchestrator(store, codex as any, () => undefined, runtime);
   return { directory, store, agents, group, direct, codex, crew };
 }
+
+test("a configured shared computer is exposed as explicit runtime tools", async () => {
+  const calls: any[] = [];
+  const runtime: RuntimeProvider = {
+    kind: "test",
+    executionEnvironment() { return { environmentId: "test", execServerUrl: "ws://127.0.0.1:4096", cwd: "/workspace", runtimeWorkspaceRoots: ["/workspace"] }; },
+    async status() { return { provider: "test", phase: "running", containerName: "computer" }; },
+    async start() { return { provider: "test", phase: "running", containerName: "computer" }; },
+    async exec(request) { calls.push(request); return { code: 0, stdout: "/workspace\n", stderr: "" }; },
+    async doctor() { return { code: 0, stdout: "healthy\n", stderr: "" }; }
+  };
+  const f = await fixture(["Done."], runtime);
+  try {
+    await f.crew.postUserMessage(f.direct.id, "Check the shared computer.");
+    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0);
+    assert.match(f.codex.calls[0].instructions || "", /persistent shared computer/);
+    const namespace = (f.codex as any).lastDynamicTools[0];
+    assert.ok(namespace.tools.some((tool: any) => tool.name === "computer_exec"));
+    const result = await (f.codex as any).dynamicToolHandler({
+      threadId: f.codex.lastThreadId, callId: "call", namespace: "oai_bot", tool: "computer_exec",
+      arguments: { argv: ["pwd"], cwd: "/workspace" }
+    });
+    assert.deepEqual(result, { exitCode: 0, stdout: "/workspace\n", stderr: "" });
+    assert.deepEqual(calls, [{ argv: ["pwd"], cwd: "/workspace" }]);
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
 
 async function waitFor(check: () => boolean) {
   for (let index = 0; index < 200; index += 1) {

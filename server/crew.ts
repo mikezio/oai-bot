@@ -5,6 +5,7 @@ import { CodexClient, describeCodexActivity } from "./codex.js";
 import { agentRoster, extractMentionedAgentIds } from "./mentions.js";
 import { isoNow, makeId, Store } from "./store.js";
 import { avatarShapeValues, normalizeAvatarVectorSpec, normalizedAvatarState } from "./avatar.js";
+import type { RuntimeProvider } from "./runtime.js";
 
 type TurnPhase = "active" | "winding-down";
 type MemberTurnResult = { requestedAgentIds: string[]; awaitingUserResponse: boolean; passed: boolean; error?: string };
@@ -17,7 +18,7 @@ export class CrewOrchestrator {
   private activeCycles = new Map<string, ActiveCycle>();
   private activityClearTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(private readonly store: Store, private readonly codex: CodexClient, private readonly broadcast: () => void) {
+  constructor(private readonly store: Store, private readonly codex: CodexClient, private readonly broadcast: () => void, private readonly runtime?: RuntimeProvider) {
     codex.on("approval", (request) => this.onApproval(request));
     codex.on("notification", (method, params) => this.onNotification(method, params));
     codex.on("dynamicTool", (phase, params) => this.onDynamicToolActivity(phase, params));
@@ -65,8 +66,7 @@ export class CrewOrchestrator {
       avatarAccessory: { type: "string", enum: ["none", "antenna", "halo", "headphones", "crown"] },
       clearAvatarImage: { type: "boolean", description: "Remove a custom image and return to the procedural character" }
     };
-    return [{
-      type: "namespace", name: "oai_bot", description: "Manage the persistent OAI Bot roster and Channels. Use these tools when the user asks you to actually change Bots or Channels. Do not merely claim a change.", tools: [
+    const tools: any[] = [
         { type: "function", name: "list_bots", description: "List current Bots and groups with their persistent IDs and editable profiles.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
         { type: "function", name: "remember", description: "Save one durable memory for your own Bot across direct chats and Channels. Use only for a stable user preference, standing instruction, responsibility, or lasting fact, not transient task chatter.", inputSchema: { type: "object", properties: { text: { type: "string", description: "Concise durable memory stated as a fact or instruction" } }, required: ["text"], additionalProperties: false } },
         { type: "function", name: "forget_memory", description: "Delete one of your own durable memories by its exact memory ID.", inputSchema: { type: "object", properties: { memoryId: { type: "string" } }, required: ["memoryId"], additionalProperties: false } },
@@ -76,8 +76,16 @@ export class CrewOrchestrator {
         { type: "function", name: "post_to_group", description: "Post a visible update as yourself into a group you belong to. An exact @Bot mention is a public handoff and wakes that Bot; a post without an exact mention is shared context only. Use message_bot for a private handoff.", inputSchema: { type: "object", properties: { group: { type: "string", description: "Group ID or exact current group name" }, text: { type: "string", description: "Visible status, finding, question, decision, or public @Bot handoff" } }, required: ["group", "text"], additionalProperties: false } },
         { type: "function", name: "update_group", description: "Update a group name, description, or membership. Members may be Bot IDs or exact current Bot names.", inputSchema: { type: "object", properties: { id: { type: "string", description: "Group ID or exact group name" }, name: { type: "string" }, description: { type: "string" }, memberIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 6 } }, required: ["id"], additionalProperties: false } },
         { type: "function", name: "create_group", description: "Create a persistent group containing ordinary existing Bots.", inputSchema: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, memberIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 6 } }, required: ["name", "memberIds"], additionalProperties: false } }
-      ]
-    }];
+    ];
+    if (this.runtime) tools.push(
+      { type: "function", name: "computer_status", description: "Inspect the shared computer without starting or changing it.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+      { type: "function", name: "computer_doctor", description: "Run the shared computer's bounded health check.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+      { type: "function", name: "computer_exec", description: "Run an argument vector inside the shared persistent computer. Use this for shell, build, test, and file commands that should be visible to every Bot. To use shell syntax, explicitly invoke bash with argv such as [\"bash\",\"-lc\",\"command\"].", inputSchema: { type: "object", properties: {
+        argv: { type: "array", minItems: 1, maxItems: 128, items: { type: "string", maxLength: 8_000 } },
+        cwd: { type: "string", description: "Absolute directory under /workspace or /home/bot/.local/share; defaults to /workspace" }
+      }, required: ["argv"], additionalProperties: false } }
+    );
+    return [{ type: "namespace", name: "oai_bot", description: "Manage persistent OAI Bot state and use the shared computer. Report only confirmed tool results.", tools }];
   }
 
   private findAgent(idOrName: string, state = this.store.snapshot()) {
@@ -89,6 +97,18 @@ export class CrewOrchestrator {
     if (request.namespace !== "oai_bot") throw new Error(`Unknown tool namespace: ${request.namespace || "none"}`);
     if (!this.threadContext.has(request.threadId)) throw new Error("The calling Bot is not attached to an OAI Bot chat");
     const args = request.arguments && typeof request.arguments === "object" ? request.arguments : {};
+    if (request.tool === "computer_status" || request.tool === "computer_doctor" || request.tool === "computer_exec") {
+      if (!this.runtime) throw new Error("The shared computer provider is not configured");
+      if (request.tool === "computer_status") return this.runtime.status();
+      if (request.tool === "computer_doctor") {
+        const result = await this.runtime.doctor();
+        return { exitCode: result.code, stdout: result.stdout.slice(-32_000), stderr: result.stderr.slice(-32_000) };
+      }
+      const argv = Array.isArray(args.argv) ? args.argv.map((value: unknown) => String(value)) : [];
+      if (!argv.length || argv.length > 128 || argv.some((value: string) => value.length > 8_000) || argv.join("").length > 64_000) throw new Error("A bounded runtime argument vector is required");
+      const result = await this.runtime.exec({ argv, cwd: typeof args.cwd === "string" ? args.cwd : undefined });
+      return { exitCode: result.code, stdout: result.stdout.slice(-32_000), stderr: result.stderr.slice(-32_000) };
+    }
     if(request.tool==="remember") {
       const context=this.threadContext.get(request.threadId)!;
       const text=String(args.text||"").replace(/\s+/g," ").trim().slice(0,1_000);
@@ -873,6 +893,8 @@ Talk to the actual people and Bots in the conversation. In a user-facing respons
 
 You have your own model turn, conversation memory, tools, and private Bot workspace. The room transcript and shared workspace are common resources, not a shared identity. Preserve other members' changes. In a Channel, an exact @Bot mention is a visible message to that Bot and wakes it. Plain names do not. Visible @Bot handoffs are the default for shared discussion, implementation, review, and verification. Use oai_bot.message_bot only for context that genuinely belongs in a private Bot-to-Bot exchange, never as the routine way to wake another member of the current Channel. ${room.kind === "group" ? `Your normal answer is already posted in ${room.name}; do not post it again with a tool.` : "When a private Bot handoff originated in a Channel, your normal answer is returned to that Channel under your own name."}
 
+${this.runtime ? "A persistent shared computer is available through oai_bot.computer_status, oai_bot.computer_doctor, and oai_bot.computer_exec. Use computer_exec for commands, builds, tests, and shared files. The native Codex shell belongs to the OAI Bot host process and is not the shared computer; do not use it for shared-computer work or claim its results came from the computer." : "No shared computer provider is configured for this OAI Bot process."}
+
 Use oai_bot tools when a request actually changes Bots, Channels, memory, or another Bot's work. Save a memory only when the user clearly establishes something lasting across conversations. Report only confirmed changes. Never pretend prose changed persistent state. For avatars, do not claim a custom abstract silhouette is a recognizable object or animal unless the tool confirms semanticVerified. The character itself is the avatar, never an icon placed inside a generic shape.
 
 If you have nothing relevant to add, output exactly [[PASS]]. If you need the user before continuing, end with [[WAIT_FOR_USER]]. Do not use em dashes. Do not perform destructive, public, account, billing, or external side effects without approval.`;
@@ -1205,6 +1227,9 @@ Keep the visible response conversational. Do not announce readiness, restate the
       create_bot: "Creating a Bot",
       update_group: "Updating the group",
       create_group: "Creating a group"
+      ,computer_status: "Checking the shared computer"
+      ,computer_doctor: "Checking computer health"
+      ,computer_exec: "Using the shared computer"
     };
     const callId = String(params.callId || "");
     if (phase === "started") {

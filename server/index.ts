@@ -12,6 +12,7 @@ import { avatarShapeValues, normalizeAvatarVectorSpec } from "./avatar.js";
 import { normalizeMessageSource } from "./clientSource.js";
 import { removeAgentFromState } from "./agentDeletion.js";
 import { removeGroupRoomFromState } from "./roomDeletion.js";
+import { DockerRuntimeProvider } from "./runtime.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -31,6 +32,11 @@ const store = new Store(path.join(root, "data", "state.json"));
 await store.load();
 await Promise.all(store.snapshot().agents.map((agent) => mkdir(path.join(root, agent.privateWorkspacePath || `agent-workspaces/${agent.id}`), { recursive: true })));
 const codex = new CodexClient(workspace);
+const runtime = process.env.OAI_RUNTIME_PROVIDER === "docker" ? new DockerRuntimeProvider({ projectRoot: root }) : undefined;
+if (runtime) {
+  await runtime.start();
+  await codex.setExecutionEnvironment(runtime.executionEnvironment());
+}
 const clients = new Set<express.Response>();
 type TranscriptStreamClient = {
   id: string;
@@ -138,12 +144,17 @@ function broadcast() {
   publishedState = next;
 }
 
-const crew = new CrewOrchestrator(store, codex, broadcast);
+const crew = new CrewOrchestrator(store, codex, broadcast, runtime);
 crew.recoverPendingMessages();
 const app = express();
 app.use(express.json({ limit: "12mb" }));
 
 app.get("/api/state", (_req, res) => res.json({ ...store.snapshot(), account, workspace }));
+app.get("/api/runtime/status", async (_req, res, next) => {
+  try {
+    res.json(runtime ? await runtime.status() : { provider: "none", phase: "missing" });
+  } catch (error) { next(error); }
+});
 app.get("/api/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");

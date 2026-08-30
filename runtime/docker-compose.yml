@@ -1,0 +1,42 @@
+name: oai-bot-runtime
+
+services:
+  computer:
+    build:
+      context: ..
+      dockerfile: runtime/Dockerfile
+      args:
+        OAI_RUNTIME_UID: ${OAI_RUNTIME_UID:-1000}
+        OAI_RUNTIME_GID: ${OAI_RUNTIME_GID:-1000}
+        OAI_CODEX_VERSION: ${OAI_CODEX_VERSION:-0.151.0}
+    container_name: oai-bot-computer
+    restart: unless-stopped
+    shm_size: ${OAI_RUNTIME_SHM_SIZE:-1gb}
+    mem_limit: ${OAI_RUNTIME_MEMORY_LIMIT:-8g}
+    cpus: ${OAI_RUNTIME_CPU_LIMIT:-4.0}
+    pids_limit: ${OAI_RUNTIME_PIDS_LIMIT:-4096}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      OAI_RUNTIME_REQUIRE_EGRESS: ${OAI_RUNTIME_REQUIRE_EGRESS:-false}
+      OAI_RUNTIME_SCREEN: ${OAI_RUNTIME_SCREEN:-1280x800x24}
+    ports:
+      - 127.0.0.1:${OAI_RUNTIME_EXEC_PORT:-4096}:4096
+      - 127.0.0.1:${OAI_RUNTIME_NOVNC_PORT:-6080}:6080
+    volumes:
+      - ${OAI_RUNTIME_WORKSPACE_PATH:-../shared-workspace}:/workspace
+      - ${OAI_RUNTIME_AGENT_WORKSPACES_PATH:-../agent-workspaces}:/agent-workspaces
+      - ${OAI_RUNTIME_USER_STATE_PATH:-../runtime-state}:/home/bot/.local/share
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1g
+      - /run/oai-runtime:rw,noexec,nosuid,size=16m,uid=${OAI_RUNTIME_UID:-1000},gid=${OAI_RUNTIME_GID:-1000},mode=0700
+      - /home/bot/.cache:rw,noexec,nosuid,size=1g,uid=${OAI_RUNTIME_UID:-1000},gid=${OAI_RUNTIME_GID:-1000},mode=0700
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/oai-runtime-doctor", "--quiet"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

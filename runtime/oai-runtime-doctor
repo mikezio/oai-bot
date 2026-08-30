@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -u
+
+quiet=false
+if [ "${1:-}" = "--quiet" ]; then quiet=true; fi
+failures=0
+
+check() {
+  local name="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    $quiet || printf '[runtime-doctor] PASS %s\n' "$name"
+  else
+    printf '[runtime-doctor] FAIL %s\n' "$name"
+    failures=$((failures + 1))
+  fi
+}
+
+check machine-id test -s /etc/machine-id
+check browser command -v oai-runtime-browser
+check codex command -v codex
+check exec-server bash -c 'exec 3<>/dev/tcp/127.0.0.1/4096'
+check clock test "$(date +%Y)" -ge 2025
+check dbus test -S "${XDG_RUNTIME_DIR:-/run/oai-runtime}/bus"
+check display xdpyinfo -display "${DISPLAY:-:1}"
+check workspace test -w /workspace
+check agent-workspaces test -w /agent-workspaces
+check user-state test -w "$HOME/.local/share"
+
+if [ "${OAI_RUNTIME_REQUIRE_EGRESS:-false}" = "true" ]; then
+  check dns getent hosts example.com
+fi
+
+if [ "$failures" -eq 0 ]; then
+  $quiet || printf '[runtime-doctor] SUMMARY healthy\n'
+else
+  printf '[runtime-doctor] SUMMARY unhealthy failures=%s\n' "$failures"
+fi
+exit "$failures"

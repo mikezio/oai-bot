@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import type { AccountState } from "./types.js";
 import { resolveCodexExecutable } from "./codexExecutable.js";
+import type { RuntimeExecutionEnvironment } from "./runtime.js";
 
 type JsonObject = Record<string, any>;
 
@@ -55,6 +56,7 @@ export class CodexClient extends EventEmitter {
   private activeThreads = new Set<string>();
   private inFlightTurns = new Map<string, { reject: (error: Error) => void; cleanup: () => void }>();
   private ready?: Promise<void>;
+  private executionEnvironment?: RuntimeExecutionEnvironment;
   private dynamicToolHandler?: (request: { threadId: string; turnId: string; callId: string; namespace: string | null; tool: string; arguments: any }) => Promise<any>;
 
   constructor(private readonly workspace: string) {
@@ -199,6 +201,39 @@ export class CodexClient extends EventEmitter {
     }
   }
 
+  async setExecutionEnvironment(environment: RuntimeExecutionEnvironment) {
+    await this.start();
+    await this.request("environment/add", {
+      environmentId: environment.environmentId,
+      execServerUrl: environment.execServerUrl,
+      connectTimeoutMs: 10_000
+    });
+    this.executionEnvironment = structuredClone(environment);
+  }
+
+  private environmentSelection() {
+    const environment = this.executionEnvironment;
+    return environment ? [{
+      environmentId: environment.environmentId,
+      cwd: environment.cwd,
+      runtimeWorkspaceRoots: environment.runtimeWorkspaceRoots
+    }] : undefined;
+  }
+
+  private sandboxMode() {
+    return this.executionEnvironment ? "danger-full-access" : "workspace-write";
+  }
+
+  private approvalPolicy() {
+    return this.executionEnvironment ? "never" : "on-request";
+  }
+
+  private sandboxPolicy(networkAccess: boolean, privateWorkspacePath?: string) {
+    return this.executionEnvironment
+      ? { type: "dangerFullAccess" }
+      : { type: "workspaceWrite", writableRoots: this.workspaceRoots(privateWorkspacePath), networkAccess };
+  }
+
   async startLogin() {
     await this.start();
     return this.request("account/login/start", {
@@ -222,8 +257,9 @@ export class CodexClient extends EventEmitter {
       model: options.model,
       cwd: this.workspace,
       runtimeWorkspaceRoots: this.workspaceRoots(options.privateWorkspacePath),
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
+      environments: this.environmentSelection(),
+      approvalPolicy: this.approvalPolicy(),
+      sandbox: this.sandboxMode(),
       baseInstructions: options.instructions,
       developerInstructions: null,
       modelProvider: null,
@@ -247,8 +283,9 @@ export class CodexClient extends EventEmitter {
       model: options.model,
       cwd: this.workspace,
       runtimeWorkspaceRoots: this.workspaceRoots(options.privateWorkspacePath),
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
+      environments: this.environmentSelection(),
+      approvalPolicy: this.approvalPolicy(),
+      sandbox: this.sandboxMode(),
       baseInstructions: options.instructions,
       personality: null,
       excludeTurns: true
@@ -273,8 +310,9 @@ export class CodexClient extends EventEmitter {
       input: [{ type: "text", text: options.prompt, text_elements: [] }],
       cwd: this.workspace,
       runtimeWorkspaceRoots: this.workspaceRoots(options.privateWorkspacePath),
-      approvalPolicy: "on-request",
-      sandboxPolicy: { type: "workspaceWrite", writableRoots: this.workspaceRoots(options.privateWorkspacePath), networkAccess: options.networkAccess === true },
+      environments: this.environmentSelection(),
+      approvalPolicy: this.approvalPolicy(),
+      sandboxPolicy: this.sandboxPolicy(options.networkAccess === true, options.privateWorkspacePath),
       model: options.model,
       effort: options.effort,
       serviceTier: null,
