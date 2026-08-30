@@ -20,6 +20,7 @@ Environment=OAI_RUNTIME_NOVNC_PORT=6080
 Environment=OAI_RUNTIME_WORKSPACE_PATH=/srv/apps/oai-bot/shared-workspace
 Environment=OAI_RUNTIME_AGENT_WORKSPACES_PATH=/srv/apps/oai-bot/agent-workspaces
 Environment=OAI_RUNTIME_USER_STATE_PATH=/srv/apps/oai-bot/runtime-state
+Environment=DOCKER_BUILDKIT=0
 ExecStart=/usr/local/bin/npm start
 Restart=on-failure
 RestartSec=5
