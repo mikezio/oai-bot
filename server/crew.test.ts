@@ -339,6 +339,18 @@ test("wait_for_user posts one durable question and enters waiting state", async 
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 
+test("a newer user message carries a hidden skipped-question cue", async () => {
+  const f = await fixture(["Current answer"]);
+  try {
+    f.store.mutate((state) => { state.agents[0].awaitingUserResponse = true; });
+    await f.crew.postUserMessage(f.direct.id, "Use this instead.");
+    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0);
+    assert.match(f.codex.calls[0].prompt, /Hidden skipped-question cue \(not a user message\)/);
+    assert.match(f.codex.calls[0].prompt, /Use this instead\./);
+    assert.equal(f.store.snapshot().agents[0].awaitingUserResponse, false);
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
 test("reasoning events do not replace a live Bot management tool activity", async () => {
   const f = await fixture();
   try {
@@ -381,6 +393,10 @@ test("semantic activity labels stay stable across Codex item variants", () => {
     if (detail.endsWith("Three")) assert.equal(activity?.target, "Three");
   }
   assert.equal(describeCodexActivity({ type: "reasoning" }), undefined);
+  assert.equal(describeCodexActivity({ type: "userMessage" }), undefined);
+  assert.equal(describeCodexActivity({ type: "agentMessage" }), undefined);
+  assert.equal(describeCodexActivity({ type: "plan" }), undefined);
+  assert.equal(describeCodexActivity({ type: "internalTransportStage" }), undefined);
 });
 
 test("tool completion and failure settle only the correlated activity without flicker", async () => {
@@ -539,8 +555,9 @@ test("message_bot persists a peer receipt and durable targeted handoff", async (
     assert.equal(handoff.originRoomId, f.group.id);
     assert.match(f.codex.calls[1].prompt, /Visible origin group: User Channel/);
     assert.match(f.codex.calls[1].prompt, /normal final response is returned there automatically/);
-    assert.equal(handoff.newMessages?.[0]?.text, "Please take this next.");
-    assert.equal(handoff.newMessages?.[0]?.speakerName, "One");
+    assert.match(handoff.newMessages?.[0]?.text || "", /Hidden peer delivery cue/);
+    assert.equal(handoff.newMessages?.[1]?.text, "Please take this next.");
+    assert.equal(handoff.newMessages?.[1]?.speakerName, "One");
     assert.equal(state.transcriptEntries.some((entry) => entry.agentId === f.agents[1].id && entry.messageId === peer.id), true);
     assert.equal(state.transcriptEntries.some((entry) => entry.agentId === f.agents[0].id && entry.messageId === peer.id), true);
     assert.equal(state.transcriptEntries.some((entry) => entry.agentId === f.agents[2].id && entry.messageId === peer.id), false);
@@ -618,6 +635,8 @@ test("a priority peer message interrupts non-user work before the recipient hand
     await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
     const state = f.store.snapshot();
     assert.equal(state.memberTurns.find((turn) => turn.id === running.id)?.state, "cancelled");
+    assert.equal(delivered.turn?.priority, true);
+    assert.match(f.codex.calls[1].prompt, /Hidden priority peer cue \(not a user message\)/);
     assert.equal(f.codex.interrupts.length, 1);
     assert.equal(state.messages.some((message) => message.content === "STALE_NON_USER_OUTPUT"), false);
     assert.equal(state.messages.at(-1)?.content, "PRIORITY_HANDLED");
@@ -635,9 +654,36 @@ test("a normal peer message waits for the recipient's active turn without interr
     await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
     const state = f.store.snapshot();
     assert.equal(state.memberTurns.find((turn) => turn.id === running.id)?.state, "passed");
+    assert.match(f.codex.calls[1].prompt, /Hidden peer delivery cue \(not a user message\)/);
     assert.equal(f.codex.interrupts.length, 0);
     assert.equal(f.codex.calls[1].activeAtStart, 0);
     assert.equal(state.messages.at(-1)?.content, "NORMAL_HANDLED");
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("a queued normal peer message runs ahead of queued routine work", async () => {
+  const f = await fixture(["[[PASS]]", "PEER_WON_QUEUE", "[[PASS]]"]);
+  try {
+    f.codex.delayMs = 80;
+    const timestamp = isoNow();
+    const routineRoom: Room = {
+      id: makeId(), name: "Routine Room", description: "Background maintenance",
+      agentIds: [f.agents[1].id], kind: "group", createdAt: timestamp, updatedAt: timestamp
+    };
+    f.store.mutate((state) => state.rooms.push(routineRoom));
+    await f.crew.requestMemberTurn(f.group.id, f.agents[1].id, "active-before-queue");
+    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 1);
+    f.crew.triggerRoutine({
+      id: "queued-routine", roomId: routineRoom.id, agentId: f.agents[1].id,
+      name: "Background upkeep", instruction: "Run low-priority upkeep", intervalMinutes: 60,
+      isEnabled: true, createdAt: timestamp, updatedAt: timestamp
+    });
+    await waitFor(() => f.store.snapshot().memberTurns.some((turn) => turn.requestedBy === "routine" && turn.state === "running"));
+    await f.crew.sendAgentMessage(f.agents[0].id, f.agents[1].id, "peer-over-routine", "Handle this before routine work.");
+    await waitFor(() => f.codex.calls.length === 3 && f.codex.active === 0);
+    assert.match(f.codex.calls[1].prompt, /Handle this before routine work\./);
+    assert.match(f.codex.calls[2].prompt, /Trusted scheduled routine/);
+    assert.equal(f.codex.interrupts.length, 0);
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 
@@ -835,11 +881,38 @@ test("avatar tool schema states the semantic boundary explicitly", async () => {
 });
 
 test("routines dispatch only their configured ordinary Bot", async () => {
-  const f = await fixture(["Routine complete."]);
+  const f = await fixture(["Background check passed.", "Routine complete."]);
   try {
     f.crew.triggerRoutine({ id: "routine", roomId: f.group.id, agentId: f.agents[1].id, name: "Check build", instruction: "Run the tests", intervalMinutes: 60, isEnabled: true, createdAt: "", updatedAt: "" });
-    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0);
-    assert.match(f.codex.calls[0].prompt, /Scheduled routine "Check build"/);
+    await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
+    assert.match(f.codex.calls[0].prompt, /Trusted scheduled routine \(hidden host instruction; not a user message\)/);
+    assert.match(f.codex.calls[0].prompt, /Routine: Check build/);
+    assert.match(f.codex.calls[1].prompt, /Hidden routine completion \(not a user message\)/);
+    assert.match(f.codex.calls[1].prompt, /Background check passed/);
+    assert.equal(f.store.snapshot().messages.some((message) => message.kind === "routine"), false);
     assert.equal(f.store.snapshot().messages.filter((message) => message.senderType === "agent").at(-1)?.senderId, f.agents[1].id);
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("a direct user message interrupts the target Bot's non-user work in another room", async () => {
+  const f = await fixture(["STALE_ROUTINE_OUTPUT", "USER_WON"]);
+  f.codex.delayMs = 100;
+  try {
+    const timestamp = isoNow();
+    const twoDirect: Room = {
+      id: makeId(), name: f.agents[1].name, description: f.agents[1].description,
+      agentIds: [f.agents[1].id], kind: "direct", directAgentId: f.agents[1].id,
+      createdAt: timestamp, updatedAt: timestamp
+    };
+    f.store.mutate((state) => state.rooms.push(twoDirect));
+    f.crew.triggerRoutine({ id: "routine-cross-room", roomId: f.group.id, agentId: f.agents[1].id, name: "Background check", instruction: "Check slowly", intervalMinutes: 60, isEnabled: true, createdAt: timestamp, updatedAt: timestamp });
+    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 1);
+    await f.crew.postUserMessage(twoDirect.id, "Answer me now.");
+    await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
+    const state = f.store.snapshot();
+    assert.equal(f.codex.interrupts.length, 1);
+    assert.equal(state.messages.some((message) => message.content === "STALE_ROUTINE_OUTPUT"), false);
+    assert.equal(state.messages.at(-1)?.content, "USER_WON");
+    assert.ok(state.memberTurns.some((turn) => turn.requestedBy === "routine" && turn.state === "cancelled"));
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });

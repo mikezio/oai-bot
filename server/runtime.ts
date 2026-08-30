@@ -85,7 +85,7 @@ export interface DockerRuntimeOptions {
   runner?: CommandRunner;
 }
 
-const allowedRuntimeRoots = ["/workspace", "/home/bot/.local/share"];
+const allowedRuntimeRoots = ["/workspace", "/home/bot/.local/share", "/home/bot/agent-data", "/home/bot/sand-data"];
 
 function assertContainerName(value: string) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(value)) throw new Error("Invalid runtime container name");
@@ -147,7 +147,8 @@ export class DockerRuntimeProvider implements RuntimeProvider {
   async start() {
     await Promise.all([
       mkdir(path.join(this.projectRoot, "shared-workspace"), { recursive: true }),
-      mkdir(path.join(this.projectRoot, "runtime-state"), { recursive: true })
+      mkdir(path.join(this.projectRoot, "runtime-state"), { recursive: true }),
+      mkdir(path.join(this.projectRoot, "agent-data"), { recursive: true })
     ]);
     const result = await this.runner(this.dockerBin, ["compose", "-f", this.composeFile, "up", "-d", "--build"], this.projectRoot);
     if (result.code !== 0) throw new Error(`Could not start shared computer: ${result.stderr.trim() || `docker exited ${result.code}`}`);
@@ -169,7 +170,7 @@ export class DockerRuntimeProvider implements RuntimeProvider {
       environmentId: "oai-bot-shared-computer",
       execServerUrl: this.execServerUrl,
       cwd: "/workspace",
-      runtimeWorkspaceRoots: ["/workspace", "/agent-workspaces"]
+      runtimeWorkspaceRoots: ["/workspace", "/agent-workspaces", "/home/bot/agent-data", "/home/bot/sand-data"]
     };
   }
 }

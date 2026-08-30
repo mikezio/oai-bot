@@ -106,11 +106,11 @@ This project needs contributors who care about the details of multi-agent conver
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request. If something feels janky, open an issue. This repository exists so other people can help make it better instead of waiting on one person to fix everything.
 
-Releases follow Semantic Versioning. Release Please maintains the changelog, version, Git tag, and GitHub release from merged pull requests. See [RELEASING.md](RELEASING.md) for the deliberately small release process.
+Releases follow Semantic Versioning. The UI reads its displayed version directly from `package.json`, so the sidebar and installed package cannot drift. Release Please maintains the changelog, package version, Git tag, and GitHub release from merged pull requests. See [RELEASING.md](RELEASING.md) for the deliberately small release process.
 
 ## Local data and security
 
-Runtime state stays in `data/`. Bot workspaces live in `agent-workspaces/`, and shared files live in `shared-workspace/`. Those directories are ignored by Git.
+Runtime state stays in `agent-data/`. Every Bot has an inspectable Grok-compatible home containing a real SQLite `store.db`, JSONL transcripts, profile files, memory logs, automation definitions, and run history. The host-wide coordination snapshot remains in `agent-data/state.json`. Bot workspaces live in `agent-workspaces/`, and shared files live in `shared-workspace/`. Those directories are ignored by Git.
 
 The workspace layout is a context and organization boundary, not a hostile security sandbox between processes running under the same macOS account. Bots can run powerful local tools. Review approval requests, avoid placing secrets in their workspaces, and run the server only on machines and networks you trust.
 

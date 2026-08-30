@@ -27,7 +27,7 @@ function objectArguments(item: JsonObject) {
 export function describeCodexActivity(item: JsonObject): CodexActivityDescriptor | undefined {
   const args = objectArguments(item);
   const raw = [item.type, item.name, item.tool, item.method, item.server, item.namespace].filter(Boolean).join(" ");
-  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  const key = raw.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().replace(/[^a-z0-9]+/g, " ");
   const targetValue = item.target ?? args.target ?? args.agent ?? args.agentName ?? args.agent_name ?? args.name;
   const target = typeof targetValue === "string" && targetValue.trim() ? targetValue.trim().slice(0, 80) : undefined;
 
@@ -44,7 +44,7 @@ export function describeCodexActivity(item: JsonObject): CodexActivityDescriptor
   if (/computer\s*(use|control)|desktop\s*(use|control)|browser\s*control/.test(key)) return { tool: "computer.use", detail: "Using the computer", target };
   if (/form|request\s*(input|user)|ask\s*user|wait\s*(user|input)/.test(key)) return { tool: "form.wait", detail: "Waiting for input", target };
   if (/mcp\s*tool\s*call/.test(key)) return { tool: `mcp.${String(item.tool || item.name || "tool")}`, detail: "Using a connected tool", target };
-  return { tool: String(item.type || item.tool || item.name || "tool"), detail: raw.replace(/ToolCall$/i, "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (value) => value.toUpperCase()), target };
+  return undefined;
 }
 
 export class CodexClient extends EventEmitter {
@@ -59,7 +59,7 @@ export class CodexClient extends EventEmitter {
   private executionEnvironment?: RuntimeExecutionEnvironment;
   private dynamicToolHandler?: (request: { threadId: string; turnId: string; callId: string; namespace: string | null; tool: string; arguments: any }) => Promise<any>;
 
-  constructor(private readonly workspace: string) {
+  constructor(private readonly workspace: string, private readonly clientVersion = "dev") {
     super();
   }
 
@@ -106,7 +106,7 @@ export class CodexClient extends EventEmitter {
       }
     });
     await this.request("initialize", {
-      clientInfo: { name: "oai-bot", title: "OAI Bot", version: "0.1.0" },
+      clientInfo: { name: "oai-bot", title: "OAI Bot", version: this.clientVersion },
       capabilities: { experimentalApi: true }
     });
     this.notify("initialized", {});

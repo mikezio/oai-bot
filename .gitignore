@@ -8,6 +8,9 @@ data/
 agent-workspaces/
 shared-workspace/
 runtime-state/
+agent-data/
+*.db-wal
+*.db-shm
 test-artifacts-archive/
 .attachments/
 

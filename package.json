@@ -1,6 +1,6 @@
 {
   "name": "oai-bot",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "An unofficial, community-built multi-agent workspace powered by Codex and a ChatGPT subscription.",
   "license": "MIT",
@@ -34,6 +34,7 @@
     "start": "tsx server/index.ts --production"
   },
   "dependencies": {
+    "better-sqlite3": "^12.10.1",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "motion": "^13.1.1",
@@ -43,6 +44,7 @@
     "tsx": "^4.19.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.3",
@@ -51,5 +53,8 @@
     "concurrently": "^9.1.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.7"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.10.1": true
   }
 }

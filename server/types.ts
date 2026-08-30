@@ -270,6 +270,8 @@ export interface MemberTurnWorkflow {
   memberAgentId: string;
   requestedBy: "user" | "agent" | "routine" | "system";
   requestedByAgentId?: string;
+  /** Priority peer delivery may interrupt and supersede non-user work. */
+  priority?: boolean;
   triggerMessageId?: string;
   peerAgentIds: string[];
   newMessageIds: string[];

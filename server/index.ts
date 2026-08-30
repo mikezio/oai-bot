@@ -13,10 +13,12 @@ import { normalizeMessageSource } from "./clientSource.js";
 import { removeAgentFromState } from "./agentDeletion.js";
 import { removeGroupRoomFromState } from "./roomDeletion.js";
 import { DockerRuntimeProvider } from "./runtime.js";
+import { AgentDataFilesystem } from "./agentData.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 const workspace = path.join(root, "shared-workspace");
+const appVersion = String(JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version || "dev");
 await mkdir(workspace, { recursive: true });
 const host = process.env.HOST || "127.0.0.1";
 
@@ -28,10 +30,13 @@ function cleanAvatarDataUrl(value: unknown) {
   return dataUrl;
 }
 
-const store = new Store(path.join(root, "data", "state.json"));
+const agentData = new AgentDataFilesystem(path.join(root, "agent-data"));
+await agentData.initialize(path.join(root, "data", "state.json"));
+const store = new Store(agentData.statePath(), (state) => agentData.sync(state));
 await store.load();
+await agentData.sync(store.snapshot());
 await Promise.all(store.snapshot().agents.map((agent) => mkdir(path.join(root, agent.privateWorkspacePath || `agent-workspaces/${agent.id}`), { recursive: true })));
-const codex = new CodexClient(workspace);
+const codex = new CodexClient(workspace, appVersion);
 const runtime = process.env.OAI_RUNTIME_PROVIDER === "docker" ? new DockerRuntimeProvider({ projectRoot: root }) : undefined;
 if (runtime) {
   await runtime.start();
@@ -144,12 +149,12 @@ function broadcast() {
   publishedState = next;
 }
 
-const crew = new CrewOrchestrator(store, codex, broadcast, runtime);
+const crew = new CrewOrchestrator(store, codex, broadcast, runtime, agentData);
 crew.recoverPendingMessages();
 const app = express();
 app.use(express.json({ limit: "12mb" }));
 
-app.get("/api/state", (_req, res) => res.json({ ...store.snapshot(), account, workspace }));
+app.get("/api/state", (_req, res) => res.json({ ...store.snapshot(), account, workspace, appVersion }));
 app.get("/api/runtime/status", async (_req, res, next) => {
   try {
     res.json(runtime ? await runtime.status() : { provider: "none", phase: "missing" });
@@ -161,7 +166,7 @@ app.get("/api/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
   clients.add(res);
-  res.write(`data: ${JSON.stringify({ type: "snapshot", state: { ...store.snapshot(), account, workspace } })}\n\n`);
+  res.write(`data: ${JSON.stringify({ type: "snapshot", state: { ...store.snapshot(), account, workspace, appVersion } })}\n\n`);
   const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 20_000);
   req.on("close", () => {
     clearInterval(heartbeat);

@@ -17,7 +17,8 @@ RUN apt-get update \
   && npm cache clean --force \
   && groupadd --gid "$OAI_RUNTIME_GID" bot \
   && useradd --uid "$OAI_RUNTIME_UID" --gid bot --create-home --shell /bin/bash bot \
-  && install -d -o bot -g bot /workspace /home/bot/.local/share /home/bot/.cache /run/oai-runtime
+  && install -d -o bot -g bot /workspace /home/bot/.local/share /home/bot/.cache /home/bot/sand-data /run/oai-runtime \
+  && ln -s /home/bot/sand-data /home/bot/agent-data
 
 COPY runtime/oai-runtime-entrypoint /usr/local/bin/oai-runtime-entrypoint
 COPY runtime/oai-runtime-doctor /usr/local/bin/oai-runtime-doctor
@@ -36,5 +37,5 @@ WORKDIR /workspace
 USER bot
 
 EXPOSE 4096 6080
-VOLUME ["/workspace", "/home/bot/.local/share"]
+VOLUME ["/workspace", "/home/bot/.local/share", "/home/bot/sand-data"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/oai-runtime-entrypoint"]

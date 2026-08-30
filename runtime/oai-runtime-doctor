@@ -26,6 +26,8 @@ check display xdpyinfo -display "${DISPLAY:-:1}"
 check workspace test -w /workspace
 check agent-workspaces test -w /agent-workspaces
 check user-state test -w "$HOME/.local/share"
+check sand-data test -w /home/bot/sand-data
+check agent-data bash -c 'test "$(readlink -f /home/bot/agent-data)" = /home/bot/sand-data && test -w /home/bot/agent-data'
 
 if [ "${OAI_RUNTIME_REQUIRE_EGRESS:-false}" = "true" ]; then
   check dns getent hosts example.com

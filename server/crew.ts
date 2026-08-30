@@ -6,6 +6,7 @@ import { agentRoster, extractMentionedAgentIds } from "./mentions.js";
 import { isoNow, makeId, Store } from "./store.js";
 import { avatarShapeValues, normalizeAvatarVectorSpec, normalizedAvatarState } from "./avatar.js";
 import type { RuntimeProvider } from "./runtime.js";
+import type { AgentDataFilesystem } from "./agentData.js";
 
 type TurnPhase = "active" | "winding-down";
 type MemberTurnResult = { requestedAgentIds: string[]; awaitingUserResponse: boolean; passed: boolean; error?: string };
@@ -14,12 +15,14 @@ type ActiveCycle = { id: string; workflowId: string; sourceMessageId: string; ca
 export class CrewOrchestrator {
   private threadContext = new Map<string, { agentId: string; roomId: string }>();
   private roomQueues = new Map<string, Promise<void>>();
-  private agentLeases = new Map<string, Promise<void>>();
+  private agentLeaseBusy = new Set<string>();
+  private agentLeaseQueues = new Map<string, Array<{ priority: number; order: number; start: () => void }>>();
+  private agentLeaseOrder = 0;
   private activeCycles = new Map<string, ActiveCycle>();
   private activityClearTimers = new Map<string, NodeJS.Timeout>();
   private waitRequests = new Map<string, { question: string; messageId: string }>();
 
-  constructor(private readonly store: Store, private readonly codex: CodexClient, private readonly broadcast: () => void, private readonly runtime?: RuntimeProvider) {
+  constructor(private readonly store: Store, private readonly codex: CodexClient, private readonly broadcast: () => void, private readonly runtime?: RuntimeProvider, private readonly agentData?: AgentDataFilesystem) {
     codex.on("approval", (request) => this.onApproval(request));
     codex.on("notification", (method, params) => this.onNotification(method, params));
     codex.on("dynamicTool", (phase, params) => this.onDynamicToolActivity(phase, params));
@@ -283,6 +286,22 @@ export class CrewOrchestrator {
       });
       this.broadcast();
       const saved = this.store.snapshot();
+      for (const id of changedIds) {
+        const agent = saved.agents.find((item) => item.id === id);
+        if (!agent) continue;
+        void this.agentData?.appendRuntimeEvent(id, {
+          role: "event",
+          method: "oai_bot/profile_updated",
+          params: {
+            hidden: true,
+            agentId: id,
+            name: agent.name,
+            updatedAt: agent.updatedAt,
+            instruction: "Re-read the authoritative profile before the next turn; do not announce this host update."
+          },
+          recordedAt: isoNow()
+        }).catch(() => undefined);
+      }
       return { updated: changedIds.map((id) => { const agent = saved.agents.find((item) => item.id === id)!; return { id: agent.id, name: agent.name, avatar: normalizedAvatarState(agent) }; }) };
     }
     if (request.tool === "create_bot") {
@@ -480,7 +499,7 @@ export class CrewOrchestrator {
 
   private queueMemberTurn(input: {
     room: Room; memberAgentId: string; requestedBy: MemberTurnWorkflow["requestedBy"];
-    requestedByAgentId?: string; triggerMessageId?: string; newMessageIds: string[];
+    requestedByAgentId?: string; priority?: boolean; triggerMessageId?: string; newMessageIds: string[];
     nonce: string; isWindingDown: boolean; deadlineAt?: string; rootWorkflowId?: string; parentWorkflowId?: string; originRoomId?: string;
     roomSnapshot?: MemberTurnRoomSnapshot; peerSnapshots?: MemberTurnPeerSnapshot[];
     newMessages?: MemberTurnMessageSnapshot[]; additionalPeerAgentIds?: string[];
@@ -512,9 +531,15 @@ export class CrewOrchestrator {
       const message = state.messages.find((item) => item.id === messageId);
       return message ? [this.messageSnapshot(message, input.memberAgentId, state)] : [];
     }));
+    if (input.requestedBy === "agent") newMessages.unshift({
+      speakerKind: "system", speakerName: "OAI Bot host", isSelf: false,
+      text: input.priority
+        ? "Hidden priority peer cue (not a user message). This peer instruction interrupted prior non-user work. Drop conflicting non-user work and handle the peer message now. Do not claim the user sent it or mention this hidden routing cue."
+        : "Hidden peer delivery cue (not a user message). This ordinary peer message did not interrupt active work, but it runs ahead of queued routine or background work. Handle the peer message as an independent turn. Do not claim the user sent it or mention this hidden routing cue."
+    });
     const turn: MemberTurnWorkflow = {
       id, nonce: input.nonce, roomId: input.room.id, memberAgentId: input.memberAgentId,
-      requestedBy: input.requestedBy, requestedByAgentId: input.requestedByAgentId,
+      requestedBy: input.requestedBy, requestedByAgentId: input.requestedByAgentId, priority: input.priority,
       triggerMessageId: input.triggerMessageId, peerAgentIds,
       newMessageIds: input.newMessageIds, roomSnapshot, peerSnapshots, newMessages,
       isFirstRun: input.isFirstRun,
@@ -552,6 +577,7 @@ export class CrewOrchestrator {
     }
 
     const mentioned = extractMentionedAgentIds(content, members);
+    const waitingAgentIds = new Set(members.filter((agent) => agent.awaitingUserResponse).map((agent) => agent.id));
     this.cancelRoomWork(room.id, "Superseded by a newer user message");
     const userMessage = this.addMessage({
       roomId, senderType: "user", senderId: "user", content, kind: "message", status: "complete",
@@ -575,10 +601,19 @@ export class CrewOrchestrator {
       const selected=await this.selectInitialGroupMember(room,members,userMessage);
       if(selected)targets=[selected];
     }
-    for (const agentId of [...new Set(targets)]) this.queueMemberTurn({
-      room, memberAgentId: agentId, requestedBy: "user", triggerMessageId: userMessage.id,
-      newMessageIds: [userMessage.id], nonce: `user-message:${userMessage.id}:${agentId}`, isWindingDown: false
-    });
+    const uniqueTargets = [...new Set(targets)];
+    await Promise.all(uniqueTargets.map((agentId) => this.cancelAgentNonUserWork(agentId, "Interrupted by a direct user message")));
+    for (const agentId of uniqueTargets) {
+      const userSnapshot = this.messageSnapshot(userMessage, agentId, this.store.snapshot());
+      this.queueMemberTurn({
+        room, memberAgentId: agentId, requestedBy: "user", triggerMessageId: userMessage.id,
+        newMessageIds: [userMessage.id], nonce: `user-message:${userMessage.id}:${agentId}`, isWindingDown: false,
+        newMessages: waitingAgentIds.has(agentId) ? [{
+          speakerKind: "system", speakerName: "OAI Bot host", isSelf: false,
+          text: "Hidden skipped-question cue (not a user message). A newer user message arrived while you were waiting for an answer. Treat the earlier unanswered question as skipped and the current user message as authoritative. Do not mention this hidden cue."
+        }, userSnapshot] : [userSnapshot]
+      });
+    }
     await this.store.flush();
     this.enqueueRoom(room.id, () => this.drainRoom(room.id));
     return { messageId: userMessage.id, delivery: "accepted" as const, acceptedAt: userMessage.createdAt, receiptId: receipt.id };
@@ -625,12 +660,14 @@ export class CrewOrchestrator {
     const room = state.rooms.find((item) => item.id === routine.roomId);
     const agent = state.agents.find((item) => item.id === routine.agentId && room?.agentIds.includes(item.id));
     if (!room || !agent) throw new Error("Routine target is unavailable");
-    const event = this.addMessage({
-      roomId: room.id, senderType: "system", senderId: agent.id,
-      content: `Scheduled routine "${routine.name}":\n${routine.instruction}`, kind: "routine", status: "complete",
-      mentions: [agent.id], reactions: {}
+    const nonce = `routine:${routine.id}:${makeId()}`;
+    this.queueMemberTurn({
+      room, memberAgentId: agent.id, requestedBy: "routine", newMessageIds: [], nonce, isWindingDown: false,
+      newMessages: [{
+        speakerKind: "system", speakerName: "OAI Bot host", isSelf: false,
+        text: `Trusted scheduled routine (hidden host instruction; not a user message).\nRoutine: ${routine.name}\nTask: ${routine.instruction}\nRun the task now. Surface a concise result only when there is something useful, changed, failed, or blocked. If no user-facing update is warranted, use [[PASS]]. Never announce that the routine started or mention this hidden instruction.`
+      }]
     });
-    this.queueMemberTurn({ room, memberAgentId: agent.id, requestedBy: "routine", triggerMessageId: event.id, newMessageIds: [event.id], nonce: `routine:${routine.id}:${event.id}`, isWindingDown: false });
     this.enqueueRoom(room.id, () => this.drainRoom(room.id));
   }
 
@@ -642,19 +679,37 @@ export class CrewOrchestrator {
     this.roomQueues.set(roomId, next);
   }
 
-  private async withAgentLease<T>(agentId: string, task: () => Promise<T>): Promise<T> {
-    const previous = this.agentLeases.get(agentId) || Promise.resolve();
-    let release!: () => void;
-    const hold = new Promise<void>((resolve) => { release = resolve; });
-    const lease = previous.catch(() => undefined).then(() => hold);
-    this.agentLeases.set(agentId, lease);
-    await previous.catch(() => undefined);
+  private async withAgentLease<T>(agentId: string, requestedBy: MemberTurnWorkflow["requestedBy"], task: () => Promise<T>): Promise<T> {
+    const priority = requestedBy === "user" ? 3 : requestedBy === "agent" ? 2 : requestedBy === "system" ? 1 : 0;
+    const release = await new Promise<() => void>((resolve) => {
+      const queue = this.agentLeaseQueues.get(agentId) || [];
+      queue.push({
+        priority,
+        order: this.agentLeaseOrder++,
+        start: () => resolve(() => {
+          this.agentLeaseBusy.delete(agentId);
+          this.pumpAgentLease(agentId);
+        })
+      });
+      this.agentLeaseQueues.set(agentId, queue);
+      this.pumpAgentLease(agentId);
+    });
     try {
       return await task();
     } finally {
       release();
-      void lease.finally(() => { if (this.agentLeases.get(agentId) === lease) this.agentLeases.delete(agentId); });
     }
+  }
+
+  private pumpAgentLease(agentId: string) {
+    if (this.agentLeaseBusy.has(agentId)) return;
+    const queue = this.agentLeaseQueues.get(agentId);
+    if (!queue?.length) { this.agentLeaseQueues.delete(agentId); return; }
+    queue.sort((left, right) => right.priority - left.priority || left.order - right.order);
+    const next = queue.shift()!;
+    if (!queue.length) this.agentLeaseQueues.delete(agentId);
+    this.agentLeaseBusy.add(agentId);
+    next.start();
   }
 
   private cancelRoomWork(roomId: string, reason: string) {
@@ -816,7 +871,7 @@ export class CrewOrchestrator {
     const sourceRoom = sourceRoomId ? state.rooms.find((item) => item.id === sourceRoomId) : undefined;
     const originRoomId = sourceWorkflow?.originRoomId || (sourceRoom?.kind === "group" ? sourceRoom.id : undefined);
     const turn = this.queueMemberTurn({
-      room, memberAgentId: toAgentId, requestedBy: "agent", requestedByAgentId: fromAgentId,
+      room, memberAgentId: toAgentId, requestedBy: "agent", requestedByAgentId: fromAgentId, priority,
       triggerMessageId: message.id, newMessageIds: [message.id], nonce: `agent-message:${messageId}:${toAgentId}`,
       isWindingDown: true, rootWorkflowId: sourceWorkflow?.rootWorkflowId, parentWorkflowId: sourceWorkflow?.id,
       additionalPeerAgentIds: [fromAgentId], originRoomId
@@ -889,7 +944,7 @@ export class CrewOrchestrator {
       });
       this.setRoomRunState(roomId, { nonce: workflow.nonce, phase: workflow.isWindingDown ? "winding-down" : "active", activeAgentId: workflow.memberAgentId, startedAt });
       if (workflow.originRoomId) this.setRoomRunState(workflow.originRoomId, { nonce: workflow.nonce, phase: workflow.isWindingDown ? "winding-down" : "active", activeAgentId: workflow.memberAgentId, startedAt });
-      const result = await this.withAgentLease(workflow.memberAgentId, () => active.cancelled
+      const result = await this.withAgentLease(workflow.memberAgentId, workflow.requestedBy, () => active.cancelled
         ? Promise.resolve<MemberTurnResult>({ requestedAgentIds: [], awaitingUserResponse: false, passed: true })
         : this.runMemberTurn(workflow, incoming, workflow.triggerMessageId || workflow.id, workflow.isWindingDown ? "winding-down" : "active", active));
       if (this.activeCycles.get(roomId) === active) this.activeCycles.delete(roomId);
@@ -1008,7 +1063,7 @@ Talk to the actual people and Bots in the conversation. In a user-facing respons
 
 You have your own model turn, conversation memory, tools, and private Bot workspace. The room transcript and shared workspace are common resources, not a shared identity. Preserve other members' changes. In a Channel, an exact @Bot mention is a visible message to that Bot and wakes it. Plain names do not. Visible @Bot handoffs are the default for shared discussion, implementation, review, and verification. Use oai_bot.message_bot only for context that genuinely belongs in a private Bot-to-Bot exchange, never as the routine way to wake another member of the current Channel. ${room.kind === "group" ? `Your normal answer is already posted in ${room.name}; do not post it again with a tool.` : "When a private Bot handoff originated in a Channel, your normal answer is returned to that Channel under your own name."}
 
-${this.runtime ? "Your native Codex shell runs inside the persistent shared computer at /workspace. Use it normally for commands, builds, tests, and shared files. oai_bot.computer_status, oai_bot.computer_doctor, and oai_bot.computer_exec are additional bounded runtime diagnostics. Never claim host-only paths or commands came from the shared computer." : "No shared computer provider is configured for this OAI Bot process."}
+${this.runtime ? `Your native Codex shell runs inside the persistent shared computer at /workspace. Use it normally for commands, builds, tests, and shared files. Persistent Bot profiles, settings, routines, memories, audits, and transcripts are inspectable under /home/bot/agent-data (a compatibility link to /home/bot/sand-data), matching the VM-home data model. Your profile is /home/bot/agent-data/agents/${agent.id}/profile.json and your transcript is /home/bot/agent-data/agent-transcripts/${agent.id}/${agent.id}.jsonl. Treat those files as the durable host record; use oai_bot control tools for state changes so the host and UI remain consistent. oai_bot.computer_status, oai_bot.computer_doctor, and oai_bot.computer_exec are additional bounded runtime diagnostics. Never claim host-only paths or commands came from the shared computer.` : "No shared computer provider is configured for this OAI Bot process."}
 
 Use oai_bot tools when a request actually changes Bots, Channels, memory, or another Bot's work. Save a memory only when the user clearly establishes something lasting across conversations. Report only confirmed changes. Never pretend prose changed persistent state. For avatars, do not claim a custom abstract silhouette is a recognizable object or animal unless the tool confirms semanticVerified. The character itself is the avatar, never an icon placed inside a generic shape.
 
@@ -1054,6 +1109,19 @@ If you have nothing relevant to add, output exactly [[PASS]]. If you need the us
     return { threadId, fresh: true };
   }
 
+  private async startEphemeralThread(agent: AgentProfile, room: Room, members: AgentProfile[], label: string) {
+    const threadId = await this.codex.startThread({
+      name: `${room.name} · ${agent.name} · ${label}`,
+      model: agent.model,
+      effort: agent.effort,
+      instructions: this.instructions(agent, room, members.filter((item) => item.id !== agent.id)),
+      privateWorkspacePath: agent.privateWorkspacePath,
+      dynamicTools: this.controlTools()
+    });
+    this.threadContext.set(threadId, { agentId: agent.id, roomId: room.id });
+    return { threadId, fresh: true };
+  }
+
   private async runMemberTurn(workflow: MemberTurnWorkflow, incoming: string, sourceMessageId: string, phase: TurnPhase, active: ActiveCycle): Promise<MemberTurnResult> {
     const roomId = workflow.roomId;
     const agentId = workflow.memberAgentId;
@@ -1091,7 +1159,10 @@ If you have nothing relevant to add, output exactly [[PASS]]. If you need the us
     });
     this.broadcast();
     try {
-      const { threadId, fresh } = await this.ensureThread(agent, executionRoom, members);
+      const isRoutineRunner = workflow.requestedBy === "routine";
+      const { threadId, fresh } = isRoutineRunner
+        ? await this.startEphemeralThread(agent, executionRoom, members, "routine")
+        : await this.ensureThread(agent, executionRoom, members);
       currentThreadId = threadId;
       const deadlineAt = this.store.snapshot().memberTurns.find((turn) => turn.id === active.workflowId)?.deadlineAt;
       if (deadlineAt) {
@@ -1137,6 +1208,7 @@ Keep the visible response conversational. Do not announce readiness, restate the
         privateWorkspacePath: agent.privateWorkspacePath,
         onDelta: (delta) => {
           if (active.cancelled) return;
+          if (isRoutineRunner) return;
           if (!composingSeen) {
             composingSeen = true;
             this.store.mutate((current) => {
@@ -1191,6 +1263,21 @@ Keep the visible response conversational. Do not announce readiness, restate the
       const text = toolWait ? "" : raw.replace(/\s*\[\[(?:WAIT_FOR_USER|REQUEST_TURN:@[^\]]+)\]\]\s*/gi, "\n").trim();
       const latest = this.store.snapshot().messages.filter((message) => message.roomId === room.id).at(-1)?.id;
       if (awaitingUserResponse) this.store.mutate((current) => { const target = current.agents.find((item) => item.id === agent.id); if (target) target.awaitingUserResponse = true; });
+      if (isRoutineRunner) {
+        if (streamingMessageId) this.store.mutate((current) => { current.messages = current.messages.filter((message) => message.id !== streamingMessageId); });
+        if (text && !/^\[\[PASS\]\][.!]?$/i.test(text)) {
+          this.queueMemberTurn({
+            room, memberAgentId: agent.id, requestedBy: "system", newMessageIds: [],
+            nonce: `routine-completion:${workflow.id}`, isWindingDown: true,
+            rootWorkflowId: workflow.rootWorkflowId || workflow.id, parentWorkflowId: workflow.id,
+            newMessages: [{
+              speakerKind: "system", speakerName: "OAI Bot host", isSelf: false,
+              text: `Hidden routine completion (not a user message). A fresh background runner finished the scheduled task.\n\nResult:\n${text}\n\nUse this result now. Take any necessary follow-up action. Tell the user only when there is a useful result, change, failure, or blocker; otherwise use [[PASS]]. Do not mention the hidden runner or routine machinery.`
+            }]
+          });
+        }
+        return { requestedAgentIds: [], awaitingUserResponse: false, passed: true };
+      }
       if (!text || /^\[\[PASS\]\][.!]?$/i.test(text)) {
         if (streamingMessageId) this.store.mutate((current) => { current.messages = current.messages.filter((message) => message.id !== streamingMessageId); });
         if (latest) this.setAgentCursor(agent.id, room.id, latest);
@@ -1278,6 +1365,9 @@ Keep the visible response conversational. Do not announce readiness, restate the
   private onNotification(method: string, params: Record<string, any>) {
     const context = this.threadContext.get(String(params.threadId || ""));
     if (!context) return;
+    if (["turn/started", "turn/completed", "item/started", "item/completed", "item/failed", "item/cancelled"].includes(method)) {
+      void this.agentData?.appendRuntimeEvent(context.agentId, { role: "event", method, params, recordedAt: isoNow() }).catch(() => undefined);
+    }
     if (method === "item/started") {
       const item = params.item || {};
       const descriptor = describeCodexActivity(item);
@@ -1342,6 +1432,7 @@ Keep the visible response conversational. Do not announce readiness, restate the
   private onDynamicToolActivity(phase: "started" | "completed" | "failed", params: Record<string, any>) {
     const context = this.threadContext.get(String(params.threadId || ""));
     if (!context) return;
+    void this.agentData?.appendRuntimeEvent(context.agentId, { role: "event", method: `oai_bot/tool/${phase}`, params, recordedAt: isoNow() }).catch(() => undefined);
     const labels: Record<string, string> = {
       list_bots: "Checking Bots and groups",
       remember: "Saving a memory",

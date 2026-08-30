@@ -157,7 +157,7 @@ export class Store {
   private state: AppState = initialState();
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor(private readonly filePath: string) {}
+  constructor(private readonly filePath: string, private readonly onPersist?: (state: AppState) => Promise<void>) {}
 
   async load() {
     await mkdir(path.dirname(this.filePath), { recursive: true });
@@ -329,6 +329,7 @@ export class Store {
     const tempPath = `${this.filePath}.tmp`;
     await writeFile(tempPath, JSON.stringify(this.state, null, 2), "utf8");
     await rename(tempPath, this.filePath);
+    if (this.onPersist) await this.onPersist(structuredClone(this.state));
   }
 }
 

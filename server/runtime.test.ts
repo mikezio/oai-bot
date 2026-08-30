@@ -29,7 +29,7 @@ test("describes the loopback-only Codex execution environment", () => {
     environmentId: "oai-bot-shared-computer",
     execServerUrl: "ws://127.0.0.1:4999",
     cwd: "/workspace",
-    runtimeWorkspaceRoots: ["/workspace", "/agent-workspaces"]
+    runtimeWorkspaceRoots: ["/workspace", "/agent-workspaces", "/home/bot/agent-data", "/home/bot/sand-data"]
   });
 });
 
@@ -60,4 +60,11 @@ test("rejects execution outside persistent runtime roots", async () => {
   const provider = new DockerRuntimeProvider({ projectRoot: "/project", runner: fake.runner });
   await assert.rejects(provider.exec({ argv: ["pwd"], cwd: "/etc" }), /persistent runtime root/);
   assert.equal(fake.calls.length, 0);
+});
+
+test("allows bounded commands inside persistent VM-home agent data", async () => {
+  const fake = fakeRunner([{ code: 0, stdout: "profile.json\n", stderr: "" }]);
+  const provider = new DockerRuntimeProvider({ projectRoot: "/project", runner: fake.runner });
+  assert.equal((await provider.exec({ argv: ["ls"], cwd: "/home/bot/agent-data/agents" })).stdout, "profile.json\n");
+  assert.deepEqual(fake.calls[0].args, ["exec", "--workdir", "/home/bot/agent-data/agents", "oai-bot-computer", "ls"]);
 });

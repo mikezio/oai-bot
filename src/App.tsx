@@ -1,5 +1,5 @@
 import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Bot, Check, ChevronDown, CircleStop, Clock3, Files, LoaderCircle, MessageCircleReply, Monitor, Moon, Paperclip, Play, Plus, RefreshCw, Send, Settings2, ShieldAlert, SmilePlus, Sun, Trash2, Users, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, Bot, Check, ChevronDown, CircleStop, Clock3, Files, LoaderCircle, MessageCircleReply, Monitor, Moon, Paperclip, Play, Plus, RefreshCw, Send, Settings2, ShieldAlert, SmilePlus, Sun, Trash2, Users, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { AvatarMark, type AvatarVectorSpec } from "./AvatarMark";
 import { useTheme } from "./theme";
@@ -16,7 +16,7 @@ type TranscriptEntry = { agentId:string; generation:number|string; entryId:strin
 type MemberTurn = { id:string; roomId:string; memberAgentId:string; state:string; updatedAt:string };
 type DeliveryReceipt = { id:string; messageId:string; status:string; delivery?:string; updatedAt:string };
 type AgentClientState = { agentId:string; unreadCount:number; hiddenFromSidebar:boolean; lastViewedAt?:string; updatedAt:string };
-type State = { agents:Agent[]; rooms:Room[]; messages:Message[]; approvals:Approval[]; routines:Routine[]; transcriptMetadata:TranscriptMetadata[]; transcriptEntries:TranscriptEntry[]; memberTurns:MemberTurn[]; deliveryReceipts:DeliveryReceipt[]; agentClientStates:AgentClientState[]; account:any; workspace?:string };
+type State = { agents:Agent[]; rooms:Room[]; messages:Message[]; approvals:Approval[]; routines:Routine[]; transcriptMetadata:TranscriptMetadata[]; transcriptEntries:TranscriptEntry[]; memberTurns:MemberTurn[]; deliveryReceipts:DeliveryReceipt[]; agentClientStates:AgentClientState[]; account:any; workspace?:string; appVersion?:string };
 type CollectionDelta<T> = { upsert:T[]; remove:string[] };
 
 const API = "";
@@ -106,6 +106,7 @@ export function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [newActivityBelow, setNewActivityBelow] = useState(false);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const markingReadRef = useRef(new Set<string>());
@@ -198,17 +199,32 @@ export function App() {
     const transcript=transcriptRef.current;
     if(!transcript)return;
     const distanceFromBottom=transcript.scrollHeight-transcript.scrollTop-transcript.clientHeight;
-    if(distanceFromBottom>180)return;
+    if(distanceFromBottom>180){setNewActivityBelow(true);return;}
     const reducedMotion=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     transcript.scrollTo({top:transcript.scrollHeight,behavior:reducedMotion?"auto":"smooth"});
+    setNewActivityBelow(false);
   }, [messages.length, messages.at(-1)?.content]);
 
   useEffect(() => {
     const transcript=transcriptRef.current;
     if(!transcript)return;
     const frame=requestAnimationFrame(()=>transcript.scrollTo({top:transcript.scrollHeight,behavior:"auto"}));
+    setNewActivityBelow(false);
     return()=>cancelAnimationFrame(frame);
   }, [roomId]);
+
+  useEffect(()=>{
+    const onKeyDown=(event:KeyboardEvent)=>{
+      if((event.metaKey||event.ctrlKey)&&event.shiftKey&&event.key.toLowerCase()==="i"&&room){event.preventDefault();setDetailsOpen(value=>!value);return;}
+      if(event.key!=="Escape")return;
+      if(modal){setModal(null);return;}
+      if(filesOpen){setFilesOpen(false);return;}
+      if(detailsOpen){setDetailsOpen(false);return;}
+      if(replyTo)setReplyTo(null);
+    };
+    window.addEventListener("keydown",onKeyDown);
+    return()=>window.removeEventListener("keydown",onKeyDown);
+  },[detailsOpen,filesOpen,modal,replyTo,room]);
 
   useEffect(()=>{
     if(roomId&&!state.rooms.some(item=>item.id===roomId)) {
@@ -262,6 +278,13 @@ export function App() {
     try { setWorkspaceFiles((await request("/api/workspace")).files); } catch(e:any) { setError(e.message); }
   }
 
+  function jumpToLatest() {
+    const reducedMotion=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const transcript=transcriptRef.current;
+    transcript?.scrollTo({top:transcript.scrollHeight,behavior:reducedMotion?"auto":"smooth"});
+    setNewActivityBelow(false);
+  }
+
   return <div className={`shell ${mobileChatOpen?"mobile-chat-open":""}`}>
     <aside className="sidebar">
       <div className="brand"><div className="brandmark"><Bot size={18}/></div><div><strong>OAI Bot</strong><span>AI teammates</span></div></div>
@@ -270,19 +293,19 @@ export function App() {
         {!chats.length&&<div className="empty-chats"><Bot size={25}/><strong>Create your first Bot</strong><span>Customize it, talk directly, then add it to Channels.</span><button onClick={()=>{setEditing(null);setModal("agent")}}>New Bot</button></div>}
         {channels.map((item) => <SidebarChat key={item.id} item={item} roomId={roomId} state={state} names={names} clientStates={clientStates} onOpen={()=>{setRoomId(item.id);setReplyTo(null);setDetailsOpen(false);setMobileChatOpen(true)}}/>)}
         {!!botChats.length&&<div className="section-label bot-section-label"><span>Bots</span><span className="section-actions"><button title="New Bot" onClick={() => {setEditing(null);setModal("agent")}}><Plus size={15}/></button></span></div>}
-        {botChats.map((item) => <SidebarChat key={item.id} item={item} roomId={roomId} state={state} names={names} clientStates={clientStates} onOpen={()=>{setRoomId(item.id);setReplyTo(null);setDetailsOpen(false);setMobileChatOpen(true)}}/>)}
+        {botChats.map((item) => <SidebarChat key={item.id} item={item} roomId={roomId} state={state} names={names} clientStates={clientStates} onOpen={()=>{setRoomId(item.id);setReplyTo(null);setDetailsOpen(false);setMobileChatOpen(true)}} onEdit={()=>{const agent=item.directAgentId?names.get(item.directAgentId):undefined;if(agent){setEditing(agent);setModal("agent")}}} onDelete={async()=>{const agent=item.directAgentId?names.get(item.directAgentId):undefined;if(!agent||!window.confirm(`Delete ${agent.name}? This permanently removes the Bot and its transcript.`))return;try{await request(`/api/agents/${agent.id}`,{method:"DELETE"})}catch(error:any){setError(error.message)}}}/>)}
       </section>
-      <Account account={state.account} onRefresh={async()=>{const next=await request("/api/account/refresh",{method:"POST"});setState(s=>({...s,account:next}))}} />
+      <Account account={state.account} version={state.appVersion} onRefresh={async()=>{const next=await request("/api/account/refresh",{method:"POST"});setState(s=>({...s,account:next}))}} />
     </aside>
 
     <main className={`chat ${detailsOpen?"details-visible":""}`}>
       <header className="chat-header">
         <button className="mobile-back" title="Back to chats" onClick={()=>{setMobileChatOpen(false);setDetailsOpen(false)}}><ArrowLeft size={20}/></button>
-        <button className="header-title" onClick={()=>room?.kind==="group"&&setDetailsOpen(value=>!value)}>{room?.kind==="direct"&&roomAgents[0]?<Avatar agent={roomAgents[0]}/>:<span className="group-avatar"><Users size={15}/></span>}<span><h1>{room?.name || "Choose a Bot or Channel"}</h1><p>{room?.runState?.phase==="waiting"?"Waiting for you":room?.kind==="group"?`${roomAgents.length} Bots`:room?.description}</p></span></button>
-        <div className="header-actions">{room?.runState?.phase==="active"&&<button className="icon-button stop-button" onClick={()=>request(`/api/agents/${room.kind==="direct"?room.directAgentId:room.id}/interrupt`,{method:"POST"}).catch(e=>setError(e.message))} title="Stop"><CircleStop size={18}/></button>}{room&&<button className="icon-button" onClick={()=>{if(room.kind==="direct"&&roomAgents[0]){setEditing(roomAgents[0]);setModal("agent")}else{setEditingRoom(room);setModal("room")}}} title={room.kind==="direct"?`Edit ${room.name}`:"Group settings"}><Settings2 size={17}/></button>}<button className="icon-button" onClick={refreshFiles} title="Shared workspace"><Files size={18}/></button></div>
+        <button className="header-title" onClick={()=>room&&setDetailsOpen(value=>!value)} title={room?"Open conversation info (⌘⇧I)":undefined}>{room?.kind==="direct"&&roomAgents[0]?<Avatar agent={roomAgents[0]}/>:<span className="group-avatar"><Users size={15}/></span>}<span><h1>{room?.name || "Choose a Bot or Channel"}</h1><p>{room?.runState?.phase==="waiting"?"Waiting for you":room?.kind==="group"?`${roomAgents.length} Bots`:room?.description}</p></span></button>
+        <div className="header-actions">{room?.runState?.phase==="active"&&<button className="icon-button stop-button" onClick={()=>request(`/api/agents/${room.kind==="direct"?room.directAgentId:room.id}/interrupt`,{method:"POST"}).catch(e=>setError(e.message))} title="Stop"><CircleStop size={18}/></button>}{room&&<button className={`icon-button ${detailsOpen?"active":""}`} onClick={()=>setDetailsOpen(value=>!value)} title="Conversation info"><Settings2 size={17}/></button>}<button className="icon-button" onClick={refreshFiles} title="Shared workspace"><Files size={18}/></button></div>
       </header>
 
-      <div className="transcript" ref={transcriptRef}>
+      <div className="transcript" ref={transcriptRef} onScroll={event=>{const target=event.currentTarget;setNewActivityBelow(target.scrollHeight-target.scrollTop-target.clientHeight>180)}}>
         {!state.account?.connected && <EmptyAuth account={state.account} setError={setError} onAccount={account=>setState(current=>({...current,account}))}/>}
         {messages.map((message) => <MessageRow key={message.id} room={room} message={message} agent={names.get(message.senderId)} agents={state.agents} allMessages={messages} onReply={setReplyTo} onReact={emoji=>request(`/api/messages/${message.id}/reactions`,{method:"POST",body:JSON.stringify({emoji})})} onOpenAgent={(agentId)=>{const direct=state.rooms.find(r=>r.directAgentId===agentId);if(direct){setRoomId(direct.id);setMobileChatOpen(true)}}}/>) }
         {workingAgents.map(agent => <div className={`activity-line ${agent.activity?.kind==="tool"?"using-tool":"composing"}`} key={agent.id}>
@@ -291,6 +314,8 @@ export function App() {
         </div>)}
         {pending.map((approval) => <ApprovalCard key={approval.id} approval={approval} onDecision={async decision=>request(`/api/approvals/${approval.id}`,{method:"POST",body:JSON.stringify({decision})})}/>) }
       </div>
+
+      {newActivityBelow&&<button className="jump-to-latest" onClick={jumpToLatest}><ArrowDown size={14}/>New activity</button>}
 
       <footer className="composer-wrap">
         {error && <div className="error-banner"><ShieldAlert size={15}/>{error}<button onClick={()=>setError("")}><X size={14}/></button></div>}
@@ -304,14 +329,16 @@ export function App() {
     </main>
 
     {filesOpen && <WorkspacePanel files={workspaceFiles} root={state.workspace||"shared-workspace"} onClose={()=>setFilesOpen(false)} onRefresh={refreshFiles}/>}
-    {detailsOpen&&room?.kind==="group"&&<ConversationDetails room={room} agents={state.agents} routines={state.routines.filter(item=>item.roomId===room.id)} onClose={()=>setDetailsOpen(false)} onCreateRoutine={()=>setModal("routine")} onOpenAgent={agentId=>{const direct=state.rooms.find(r=>r.directAgentId===agentId);if(direct){setRoomId(direct.id);setDetailsOpen(false)}}}/>}
+    {detailsOpen&&room?.kind==="group"&&<ConversationDetails room={room} agents={state.agents} routines={state.routines.filter(item=>item.roomId===room.id)} onClose={()=>setDetailsOpen(false)} onSettings={()=>{setEditingRoom(room);setModal("room")}} onCreateRoutine={()=>setModal("routine")} onOpenAgent={agentId=>{const direct=state.rooms.find(r=>r.directAgentId===agentId);if(direct){setRoomId(direct.id);setDetailsOpen(false)}}}/>}
+    {detailsOpen&&room?.kind==="direct"&&roomAgents[0]&&<AgentDetails agent={roomAgents[0]} room={room} rooms={state.rooms} routines={state.routines.filter(item=>item.agentId===roomAgents[0].id)} onClose={()=>setDetailsOpen(false)} onOpenWorkspace={refreshFiles} onSettings={()=>{setEditing(roomAgents[0]);setModal("agent")}} onCreateRoutine={()=>setModal("routine")}/>}
     {modal==="agent" && <AgentModal agent={editing} onClose={()=>setModal(null)} onSaved={()=>setModal(null)}/>}
     {modal==="room" && <RoomModal agents={state.agents} room={editingRoom} onClose={()=>setModal(null)} onDeleted={()=>{setModal(null);setDetailsOpen(false)}} onSaved={(newRoom)=>{setRoomId(newRoom.id);setModal(null)}}/>}
     {modal==="routine"&&room&&<RoutineModal room={room} agents={roomAgents} onClose={()=>setModal(null)} onSaved={()=>setModal(null)}/>}
   </div>;
 }
 
-function SidebarChat({item,roomId,state,names,clientStates,onOpen}:{item:Room;roomId:string;state:State;names:Map<string,Agent>;clientStates:Map<string,AgentClientState>;onOpen:()=>void}) {
+function SidebarChat({item,roomId,state,names,clientStates,onOpen,onEdit,onDelete}:{item:Room;roomId:string;state:State;names:Map<string,Agent>;clientStates:Map<string,AgentClientState>;onOpen:()=>void;onEdit?:()=>void;onDelete?:()=>Promise<void>}) {
+  const [menu,setMenu]=useState<{x:number;y:number}|null>(null);
   const directAgent=item.directAgentId?names.get(item.directAgentId):undefined;
   const directClientState=item.directAgentId?clientStates.get(item.directAgentId):undefined;
   const latest=[...state.messages].reverse().find(message=>message.roomId===item.id&&message.kind!=="activity");
@@ -324,15 +351,24 @@ function SidebarChat({item,roomId,state,names,clientStates,onOpen}:{item:Room;ro
       ? `Bot activity from ${latestAgent?.name||"another Bot"}`
       : `${latest.senderType==="user"?"You":latestAgent?.name||"System"}: ${text||"Working"}`;
   }
-  return <button className={`chat-link ${item.id===roomId?"active":""}`} onClick={onOpen}>
+  useEffect(()=>{
+    if(!menu)return;
+    const close=()=>setMenu(null);
+    const onKey=(event:KeyboardEvent)=>event.key==="Escape"&&close();
+    window.addEventListener("pointerdown",close);
+    window.addEventListener("blur",close);
+    window.addEventListener("keydown",onKey);
+    return()=>{window.removeEventListener("pointerdown",close);window.removeEventListener("blur",close);window.removeEventListener("keydown",onKey)};
+  },[menu]);
+  return <><button className={`chat-link ${item.id===roomId?"active":""}`} onClick={onOpen} onContextMenu={event=>{if(!directAgent)return;event.preventDefault();setMenu({x:event.clientX,y:event.clientY})}} aria-haspopup={directAgent?"menu":undefined}>
     {directAgent?<Avatar agent={directAgent}/>:<span className="group-avatar"><Users size={15}/></span>}
     <span className="chat-link-copy"><strong>{item.name}</strong><small>{preview}</small></span>
     {!!directClientState?.unreadCount&&<span className="unread-count" aria-label={`${directClientState.unreadCount} unread message${directClientState.unreadCount===1?"":"s"}`}>{directClientState.unreadCount>99?"99+":directClientState.unreadCount}</span>}
     {directAgent?.status==="working"&&<i className="presence working"/>}
-  </button>;
+  </button>{menu&&<div className="bot-context-menu" role="menu" style={{left:Math.min(menu.x,window.innerWidth-190),top:Math.min(menu.y,window.innerHeight-110)}} onPointerDown={event=>event.stopPropagation()}><button role="menuitem" onClick={()=>{setMenu(null);onEdit?.()}}><Settings2 size={14}/>Bot settings</button><button className="danger" role="menuitem" onClick={()=>{setMenu(null);void onDelete?.()}}><Trash2 size={14}/>Delete Bot…</button></div>}</>;
 }
 
-function Account({account,onRefresh}:{account:any;onRefresh:()=>void}) {
+function Account({account,version,onRefresh}:{account:any;version?:string;onRefresh:()=>void}) {
   const theme=useTheme();
   const used = Math.round(account?.primaryUsedPercent || 0);
   const plan = String(account?.planType || "").toLowerCase().startsWith("pro") ? "Pro" : account?.planType || "";
@@ -340,6 +376,7 @@ function Account({account,onRefresh}:{account:any;onRefresh:()=>void}) {
     <div><span className="account-dot"/><strong>{account?.authMode==="chatgpt"?`ChatGPT ${plan}`:"ChatGPT sign-in needed"}</strong><button onClick={onRefresh}><RefreshCw size={13}/></button></div>
     {account?.authMode==="chatgpt" ? <><p>{account.email || "Managed account"}</p><div className="usage"><span style={{width:`${Math.min(100,used)}%`}}/></div><small>{used}% of current Codex window used</small></> : <p>API-key fallback is off, so turns only use your ChatGPT plan.</p>}
     <div className="theme-switch" aria-label="Appearance">{([['system',Monitor],['light',Sun],['dark',Moon]] as const).map(([value,Icon])=><button key={value} className={theme.preference===value?"active":""} title={`${value[0].toUpperCase()}${value.slice(1)} appearance`} onClick={()=>theme.setPreference(value)}><Icon size={13}/></button>)}</div>
+    {version&&<small className="app-version">OAI Bot v{version}</small>}
   </div>
 }
 
@@ -461,10 +498,23 @@ function RoutineModal({room,agents,onClose,onSaved}:{room:Room;agents:Agent[];on
   return <Modal title="Create routine" onClose={onClose}><form onSubmit={save} className="form"><label>Name<input required value={name} onChange={e=>setName(e.target.value)} placeholder="Daily project check"/></label><label>Agent<select value={agentId} onChange={e=>setAgentId(e.target.value)}>{agents.map(agent=><option key={agent.id} value={agent.id}>{agent.name} · {agent.title}</option>)}</select></label><label>Instruction<textarea className="tall" required value={instruction} onChange={e=>setInstruction(e.target.value)} placeholder="What should this agent do each time?"/></label><label>When to run<select value={intervalMinutes} onChange={e=>setIntervalMinutes(Number(e.target.value))}><option value={60}>Every hour</option><option value={360}>Every 6 hours</option><option value={1440}>Every day</option><option value={10080}>Every week</option></select></label><button className="save" type="submit"><Clock3 size={16}/>Create routine</button></form></Modal>
 }
 
-function ConversationDetails({room,agents,routines,onClose,onCreateRoutine,onOpenAgent}:{room:Room;agents:Agent[];routines:Routine[];onClose:()=>void;onCreateRoutine:()=>void;onOpenAgent:(id:string)=>void}) {
+function AgentDetails({agent,room,rooms,routines,onClose,onOpenWorkspace,onSettings,onCreateRoutine}:{agent:Agent;room:Room;rooms:Room[];routines:Routine[];onClose:()=>void;onOpenWorkspace:()=>void;onSettings:()=>void;onCreateRoutine:()=>void}) {
+  const channels=rooms.filter(item=>item.kind==="group"&&item.agentIds.includes(agent.id));
+  const activity=agent.awaitingUserResponse?"Waiting for you":agent.activity?.detail||agent.activity?.tool||(agent.status==="working"?"Working in the shared computer":"Computer ready");
+  return <aside className="conversation-details agent-details">
+    <header><div className="agent-details-title"><AvatarMark agent={agent} large/><div><div className="eyebrow">BOT</div><h2>{agent.name}</h2><p>{agent.title||"AI teammate"}</p></div></div><div className="detail-header-actions"><button onClick={onSettings} title={`Open ${agent.name} settings`}><Settings2 size={16}/></button><button onClick={onClose} title="Close info"><X size={17}/></button></div></header>
+    <section className="agent-computer-section"><div className="details-heading"><h3>Computer</h3><span className={`computer-status ${agent.status==="working"?"active":""}`}>{agent.status==="working"?"Live":"Ready"}</span></div><button className="computer-preview" onClick={onOpenWorkspace}><span className="computer-preview-toolbar"><i/><i/><i/><small>Shared environment</small></span><span className="computer-preview-body"><Monitor size={24}/><strong>{activity}</strong><small>Open the shared computer and files</small></span></button></section>
+    {agent.description&&<section><h3>About</h3><p className="channel-description">{agent.description}</p></section>}
+    <section><div className="details-heading"><h3>Routines</h3><button onClick={onCreateRoutine}><Plus size={14}/>New</button></div>{routines.length?routines.map(routine=><div className="routine-card" key={routine.id}><div><strong>{routine.name}</strong><small>{routine.isEnabled?"Next run scheduled":"Paused"} · every {routine.intervalMinutes<1440?`${routine.intervalMinutes/60}h`:routine.intervalMinutes===1440?"day":`${routine.intervalMinutes/1440}d`}</small></div><button title="Run now" onClick={()=>request(`/api/routines/${routine.id}/run`,{method:"POST"})}><Play size={13}/></button><button className={`routine-toggle ${routine.isEnabled?"on":""}`} title={routine.isEnabled?"Disable":"Enable"} onClick={()=>request(`/api/routines/${routine.id}`,{method:"PATCH",body:JSON.stringify({isEnabled:!routine.isEnabled})})}><span/></button><button title="Delete routine" onClick={()=>window.confirm(`Delete ${routine.name}?`)&&request(`/api/routines/${routine.id}`,{method:"DELETE"})}><Trash2 size={13}/></button></div>):<div className="details-empty-card"><Clock3 size={18}/><p>No routines yet</p><span>Give {agent.name} recurring work that runs in a fresh session.</span><button onClick={onCreateRoutine}>Create routine</button></div>}</section>
+    <section><h3>Channels</h3>{channels.length?<div className="channel-memberships">{channels.map(channel=><div key={channel.id}><span className="group-avatar small"><Users size={12}/></span><span><strong>{channel.name}</strong><small>{channel.description||`${channel.agentIds.length} Bots`}</small></span></div>)}</div>:<p className="details-empty">{agent.name} is not in any Channels yet.</p>}</section>
+    <footer className="agent-details-footer"><span>Conversation</span><strong>{room.name}</strong><kbd>⌘⇧I</kbd></footer>
+  </aside>;
+}
+
+function ConversationDetails({room,agents,routines,onClose,onSettings,onCreateRoutine,onOpenAgent}:{room:Room;agents:Agent[];routines:Routine[];onClose:()=>void;onSettings:()=>void;onCreateRoutine:()=>void;onOpenAgent:(id:string)=>void}) {
   const members=agents.filter(agent=>room.agentIds.includes(agent.id)); const available=agents.filter(agent=>!room.agentIds.includes(agent.id));
   async function setMembers(ids:string[]){if(!ids.length)return;await request(`/api/rooms/${room.id}`,{method:"PATCH",body:JSON.stringify({agentIds:ids})})}
-  return <aside className="conversation-details"><header><div><div className="eyebrow">CHANNEL</div><h2>{room.name}</h2></div><button onClick={onClose}><X size={17}/></button></header>{room.description&&<section><h3>Description</h3><p className="channel-description">{room.description}</p></section>}<section><h3>Members</h3>{members.map(agent=><div className="detail-agent" key={agent.id}><button onClick={()=>onOpenAgent(agent.id)}><Avatar agent={agent}/><span><strong>{agent.name}</strong><small>{agent.title||"No label"}</small></span></button><button disabled={members.length===1} title={`Remove ${agent.name}`} onClick={()=>setMembers(room.agentIds.filter(id=>id!==agent.id))}><X size={14}/></button></div>)}{available.length>0&&<div className="add-members"><span>Add a Bot</span>{available.map(agent=><button key={agent.id} disabled={room.agentIds.length>=6} onClick={()=>setMembers([...room.agentIds,agent.id])}><Plus size={13}/>{agent.name}</button>)}</div>}</section><section><div className="details-heading"><h3>Routines</h3><button onClick={onCreateRoutine}><Plus size={14}/>New</button></div>{routines.length?routines.map(routine=><div className="routine-card" key={routine.id}><div><strong>{routine.name}</strong><small>{agents.find(agent=>agent.id===routine.agentId)?.name} · every {routine.intervalMinutes<1440?`${routine.intervalMinutes/60}h`:routine.intervalMinutes===1440?"day":`${routine.intervalMinutes/1440}d`}</small></div><button title="Run now" onClick={()=>request(`/api/routines/${routine.id}/run`,{method:"POST"})}><Play size={13}/></button><button className={`routine-toggle ${routine.isEnabled?"on":""}`} title={routine.isEnabled?"Disable":"Enable"} onClick={()=>request(`/api/routines/${routine.id}`,{method:"PATCH",body:JSON.stringify({isEnabled:!routine.isEnabled})})}><span/></button><button title="Delete routine" onClick={()=>window.confirm(`Delete ${routine.name}?`)&&request(`/api/routines/${routine.id}`,{method:"DELETE"})}><Trash2 size={13}/></button></div>):<p className="details-empty">Recurring work for a Bot in this Channel.</p>}</section></aside>
+  return <aside className="conversation-details"><header><div><div className="eyebrow">CHANNEL</div><h2>{room.name}</h2></div><div className="detail-header-actions"><button onClick={onSettings} title="Channel settings"><Settings2 size={16}/></button><button onClick={onClose} title="Close info"><X size={17}/></button></div></header>{room.description&&<section><h3>Description</h3><p className="channel-description">{room.description}</p></section>}<section><h3>Members</h3>{members.map(agent=><div className="detail-agent" key={agent.id}><button onClick={()=>onOpenAgent(agent.id)}><Avatar agent={agent}/><span><strong>{agent.name}</strong><small>{agent.title||"No label"}</small></span></button><button disabled={members.length===1} title={`Remove ${agent.name}`} onClick={()=>setMembers(room.agentIds.filter(id=>id!==agent.id))}><X size={14}/></button></div>)}{available.length>0&&<div className="add-members"><span>Add a Bot</span>{available.map(agent=><button key={agent.id} disabled={room.agentIds.length>=6} onClick={()=>setMembers([...room.agentIds,agent.id])}><Plus size={13}/>{agent.name}</button>)}</div>}</section><section><div className="details-heading"><h3>Routines</h3><button onClick={onCreateRoutine}><Plus size={14}/>New</button></div>{routines.length?routines.map(routine=><div className="routine-card" key={routine.id}><div><strong>{routine.name}</strong><small>{agents.find(agent=>agent.id===routine.agentId)?.name} · every {routine.intervalMinutes<1440?`${routine.intervalMinutes/60}h`:routine.intervalMinutes===1440?"day":`${routine.intervalMinutes/1440}d`}</small></div><button title="Run now" onClick={()=>request(`/api/routines/${routine.id}/run`,{method:"POST"})}><Play size={13}/></button><button className={`routine-toggle ${routine.isEnabled?"on":""}`} title={routine.isEnabled?"Disable":"Enable"} onClick={()=>request(`/api/routines/${routine.id}`,{method:"PATCH",body:JSON.stringify({isEnabled:!routine.isEnabled})})}><span/></button><button title="Delete routine" onClick={()=>window.confirm(`Delete ${routine.name}?`)&&request(`/api/routines/${routine.id}`,{method:"DELETE"})}><Trash2 size={13}/></button></div>):<p className="details-empty">Recurring work for a Bot in this Channel.</p>}</section></aside>
 }
 
 function Modal({title,onClose,children}:{title:string;onClose:()=>void;children:any}) { return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)onClose()}}><div className="modal"><header><h2>{title}</h2><button onClick={onClose}><X size={18}/></button></header>{children}</div></div> }
