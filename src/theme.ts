@@ -40,6 +40,14 @@ export function resolveTheme(value: ThemePreference = preference): ResolvedTheme
   return getMediaQuery()?.matches ? "dark" : "light";
 }
 
+function syncThemeColorMeta(resolved: ResolvedTheme): void {
+  if (!canUseDOM()) return;
+  const color = resolved === "dark" ? "#000000" : "#f2f2f7";
+  for (const meta of Array.from(document.querySelectorAll('meta[name="theme-color"]'))) {
+    meta.setAttribute("content", color);
+  }
+}
+
 function applyTheme(): void {
   if (!canUseDOM()) return;
 
@@ -48,6 +56,7 @@ function applyTheme(): void {
   root.dataset.theme = resolved;
   root.dataset.themePreference = preference;
   root.style.colorScheme = resolved;
+  syncThemeColorMeta(resolved);
 }
 
 function notify(): void {
