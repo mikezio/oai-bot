@@ -30,7 +30,7 @@
     "server": "tsx server/index.ts",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test server/*.test.ts src/*.test.ts",
+    "test": "tsx scripts/run-tests.ts",
     "start": "tsx server/index.ts --production"
   },
   "dependencies": {
