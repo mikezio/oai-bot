@@ -18,10 +18,11 @@ test("uses an explicit CODEX_BIN", async () => {
 
 test("finds codex on PATH", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "oai-bot-codex-"));
-  const executable = path.join(directory, "codex");
+  const testPlatform = process.platform === "win32" ? "win32" : "linux";
+  const executable = path.join(directory, testPlatform === "win32" ? "codex.cmd" : "codex");
   await writeFile(executable, "test");
   try {
-    assert.equal(await resolveCodexExecutable({ PATH: directory }, "linux"), executable);
+    assert.equal(await resolveCodexExecutable({ PATH: directory }, testPlatform), executable);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
