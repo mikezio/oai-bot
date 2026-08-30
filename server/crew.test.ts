@@ -504,6 +504,11 @@ test("a direct private peer handoff makes the peer message the recipient's immed
   try {
     await f.crew.postUserMessage(f.direct.id, "Privately ask Two to verify this.");
     await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0);
+    f.store.mutate((state) => {
+      const recipient = state.agents.find((agent) => agent.id === f.agents[1].id)!;
+      recipient.awaitingUserResponse = true;
+      recipient.status = "waiting";
+    });
     const threadId = f.store.snapshot().agents[0].roomThreadIds[f.direct.id];
     await (f.codex as any).dynamicToolHandler({
       threadId, turnId: "direct-peer-turn", callId: "direct-peer-call", namespace: "oai_bot", tool: "message_bot",
@@ -513,6 +518,8 @@ test("a direct private peer handoff makes the peer message the recipient's immed
     assert.match(f.codex.calls[1].prompt, /Current workflow request \(authoritative scope\):\nReturn PRIVATE_PEER_OK/);
     assert.doesNotMatch(f.codex.calls[1].prompt, /Current workflow request \(authoritative scope\):\nPrivately ask Two/);
     assert.equal(f.store.snapshot().messages.at(-1)?.content, "PRIVATE_PEER_OK");
+    assert.equal(f.store.snapshot().agents.find((agent) => agent.id === f.agents[1].id)?.awaitingUserResponse, false);
+    assert.equal(f.store.snapshot().agents.find((agent) => agent.id === f.agents[1].id)?.status, "idle");
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 

@@ -698,6 +698,10 @@ export class CrewOrchestrator {
     const content = text.trim().slice(0, 8_000);
     if (!content) throw new Error("Peer message text is required");
     const message = this.addMessage({ roomId: room.id, senderType: "agent", senderId: fromAgentId, fromAgentId, toAgentIds: [toAgentId], content, kind: "peer-message", status: "complete", mentions: [toAgentId], clientNonce: messageId, reactions: {} });
+    this.store.mutate((current) => {
+      const recipient = current.agents.find((agent) => agent.id === toAgentId);
+      if (recipient) recipient.awaitingUserResponse = false;
+    });
     const sourceActive = sourceRoomId ? this.activeCycles.get(sourceRoomId) : undefined;
     const sourceWorkflow = sourceActive ? state.memberTurns.find((turn) => turn.id === sourceActive.workflowId) : undefined;
     const sourceRoom = sourceRoomId ? state.rooms.find((item) => item.id === sourceRoomId) : undefined;
