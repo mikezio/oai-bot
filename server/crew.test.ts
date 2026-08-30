@@ -140,6 +140,21 @@ test("an unaddressed Channel message starts with one ordinary roster member", as
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 
+test("a newly created Bot opens its direct chat exactly once from a hidden first-run cue", async () => {
+  const f = await fixture(["Hello. What should we tackle first?"]);
+  try {
+    await f.crew.startAgentFirstRun(f.agents[0].id);
+    await f.crew.startAgentFirstRun(f.agents[0].id);
+    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0);
+    const state = f.store.snapshot();
+    assert.match(f.codex.calls[0].prompt, /First run: The user just created One/);
+    assert.match(f.codex.calls[0].prompt, /Do not mention this hidden cue/);
+    assert.equal(state.memberTurns.filter((turn) => turn.nonce === `first-run:${f.agents[0].id}`).length, 1);
+    assert.equal(state.messages.filter((message) => message.roomId === f.direct.id && message.senderType === "agent").length, 1);
+    assert.equal(state.messages.some((message) => message.senderType === "system"), false);
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
 test("a user mention addresses that Bot without invoking role based routing", async () => {
   const f = await fixture(["I was directly addressed."]);
   try {
@@ -252,6 +267,18 @@ test("an exact Bot mention in a visible Channel response creates a public handof
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 
+test("a quoted handoff example does not pre-address its recipient or duplicate the public handoff", async () => {
+  const f = await fixture(["PUBLIC_START @Two reply PUBLIC_OK", "PUBLIC_OK"]);
+  try {
+    await f.crew.postUserMessage(f.group.id, "@One reply exactly `PUBLIC_START @Two reply PUBLIC_OK`");
+    await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
+    const state = f.store.snapshot();
+    const visible = state.messages.filter((message) => message.roomId === f.group.id && message.senderType === "agent");
+    assert.deepEqual(visible.map((message) => message.content), ["PUBLIC_START @Two reply PUBLIC_OK", "PUBLIC_OK"]);
+    assert.deepEqual(state.memberTurns.filter((turn) => turn.roomId === f.group.id).map((turn) => turn.memberAgentId), [f.agents[0].id, f.agents[1].id]);
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
 test("a Bot already queued in the same workflow is not queued again by a later handoff", async () => {
   const f = await fixture(["@Two build this, then @Three verify it.", "Built. @Three please verify now.", "Verified once."]);
   try {
@@ -282,6 +309,33 @@ test("waiting marker leaves the Bot and Channel awaiting the user", async () => 
     await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0 && f.store.snapshot().rooms.find((room) => room.id === f.direct.id)?.runState?.phase === "waiting");
     assert.equal(f.store.snapshot().agents[0].awaitingUserResponse, true);
     assert.equal(f.store.snapshot().agents[0].status, "waiting");
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("wait_for_user posts one durable question and enters waiting state", async () => {
+  const f = await fixture(["[[PASS]]"]);
+  try {
+    f.codex.delayMs = 40;
+    void f.crew.postUserMessage(f.direct.id, "Ask before continuing");
+    await waitFor(() => f.codex.active === 1);
+    const threadId = f.codex.lastThreadId!;
+    const result = await (f.codex as any).dynamicToolHandler({
+      threadId, turnId: "wait-turn", callId: "wait-call", namespace: "oai_bot", tool: "wait_for_user",
+      arguments: { question: "Which color should I use?" }
+    });
+    const duplicate = await (f.codex as any).dynamicToolHandler({
+      threadId, turnId: "wait-turn", callId: "wait-call", namespace: "oai_bot", tool: "wait_for_user",
+      arguments: { question: "Which color should I use?" }
+    });
+    await waitFor(() => f.codex.active === 0 && f.store.snapshot().rooms.find((room) => room.id === f.direct.id)?.runState?.phase === "waiting");
+    const state = f.store.snapshot();
+    assert.equal(result.waiting, true);
+    assert.equal(result.duplicate, false);
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(duplicate.questionId, result.questionId);
+    assert.equal(state.messages.filter((message) => message.senderId === f.agents[0].id && message.content === "Which color should I use?").length, 1);
+    assert.equal(state.agents[0].awaitingUserResponse, true);
+    assert.equal(state.agents[0].status, "waiting");
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 
@@ -488,6 +542,7 @@ test("message_bot persists a peer receipt and durable targeted handoff", async (
     assert.equal(handoff.newMessages?.[0]?.text, "Please take this next.");
     assert.equal(handoff.newMessages?.[0]?.speakerName, "One");
     assert.equal(state.transcriptEntries.some((entry) => entry.agentId === f.agents[1].id && entry.messageId === peer.id), true);
+    assert.equal(state.transcriptEntries.some((entry) => entry.agentId === f.agents[0].id && entry.messageId === peer.id), true);
     assert.equal(state.transcriptEntries.some((entry) => entry.agentId === f.agents[2].id && entry.messageId === peer.id), false);
     const returned = state.messages.find((message) => message.senderId === f.agents[1].id && message.content === "Target handled it.")!;
     assert.equal(returned.roomId, f.group.id);
@@ -516,10 +571,94 @@ test("a direct private peer handoff makes the peer message the recipient's immed
     });
     await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
     assert.match(f.codex.calls[1].prompt, /Current workflow request \(authoritative scope\):\nReturn PRIVATE_PEER_OK/);
+    assert.match(f.codex.calls[1].prompt, /If you have a result, question, or actionable reply for that Bot, send it back with oai_bot.message_bot/);
     assert.doesNotMatch(f.codex.calls[1].prompt, /Current workflow request \(authoritative scope\):\nPrivately ask Two/);
     assert.equal(f.store.snapshot().messages.at(-1)?.content, "PRIVATE_PEER_OK");
     assert.equal(f.store.snapshot().agents.find((agent) => agent.id === f.agents[1].id)?.awaitingUserResponse, false);
     assert.equal(f.store.snapshot().agents.find((agent) => agent.id === f.agents[1].id)?.status, "idle");
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("a private peer can send an asynchronous result back that wakes the original sender", async () => {
+  const f = await fixture(["[[PASS]]", "[[PASS]]", "SENDER_RECEIVED_RESULT"]);
+  try {
+    await f.crew.postUserMessage(f.direct.id, "Ask Two to check this.");
+    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0);
+    const senderThread = f.store.snapshot().agents[0].roomThreadIds[f.direct.id];
+    f.codex.delayMs = 60;
+    await (f.codex as any).dynamicToolHandler({
+      threadId: senderThread, turnId: "send", callId: "outbound", namespace: "oai_bot", tool: "message_bot",
+      arguments: { target: "Two", text: "Check and report back." }
+    });
+    await waitFor(() => f.codex.active === 1 && f.codex.calls.length === 2);
+    const recipientThread = f.codex.lastThreadId!;
+    await (f.codex as any).dynamicToolHandler({
+      threadId: recipientThread, turnId: "reply", callId: "return", namespace: "oai_bot", tool: "message_bot",
+      arguments: { target: "One", text: "The check passed." }
+    });
+    await waitFor(() => f.codex.calls.length === 3 && f.codex.active === 0);
+    const state = f.store.snapshot();
+    const returned = state.messages.find((message) => message.clientNonce === "return")!;
+    assert.equal(returned.roomId, f.direct.id);
+    assert.deepEqual(returned.toAgentIds, [f.agents[0].id]);
+    assert.match(f.codex.calls[2].prompt, /Current workflow request \(authoritative scope\):\nThe check passed\./);
+    assert.equal(state.messages.at(-1)?.content, "SENDER_RECEIVED_RESULT");
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("a priority peer message interrupts non-user work before the recipient handles it", async () => {
+  const f = await fixture(["STALE_NON_USER_OUTPUT", "PRIORITY_HANDLED"]);
+  try {
+    f.codex.delayMs = 80;
+    const running = await f.crew.requestMemberTurn(f.group.id, f.agents[1].id, "background-two");
+    await waitFor(() => f.codex.active === 1);
+    const delivered = await f.crew.sendAgentMessage(
+      f.agents[0].id, f.agents[1].id, "priority-peer", "Stop and handle this now.", undefined, true
+    );
+    await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
+    const state = f.store.snapshot();
+    assert.equal(state.memberTurns.find((turn) => turn.id === running.id)?.state, "cancelled");
+    assert.equal(f.codex.interrupts.length, 1);
+    assert.equal(state.messages.some((message) => message.content === "STALE_NON_USER_OUTPUT"), false);
+    assert.equal(state.messages.at(-1)?.content, "PRIORITY_HANDLED");
+    assert.equal(delivered.turn?.state === "queued" || delivered.turn?.state === "completed", true);
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("a normal peer message waits for the recipient's active turn without interrupting it", async () => {
+  const f = await fixture(["[[PASS]]", "NORMAL_HANDLED"]);
+  try {
+    f.codex.delayMs = 60;
+    const running = await f.crew.requestMemberTurn(f.group.id, f.agents[1].id, "background-two-normal");
+    await waitFor(() => f.codex.active === 1);
+    await f.crew.sendAgentMessage(f.agents[0].id, f.agents[1].id, "normal-peer", "Handle after current work.");
+    await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
+    const state = f.store.snapshot();
+    assert.equal(state.memberTurns.find((turn) => turn.id === running.id)?.state, "passed");
+    assert.equal(f.codex.interrupts.length, 0);
+    assert.equal(f.codex.calls[1].activeAtStart, 0);
+    assert.equal(state.messages.at(-1)?.content, "NORMAL_HANDLED");
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("a priority peer supersedes older non-user turns that are running or lease-blocked", async () => {
+  const f = await fixture(["STALE_RUNNING", "PRIORITY_WON"]);
+  try {
+    f.codex.delayMs = 80;
+    const running = await f.crew.requestMemberTurn(f.group.id, f.agents[1].id, "background-running");
+    await waitFor(() => f.codex.active === 1);
+    const normal = await f.crew.sendAgentMessage(f.agents[0].id, f.agents[1].id, "normal-before-priority", "Older normal work.");
+    await waitFor(() => f.store.snapshot().memberTurns.find((turn) => turn.id === normal.turn?.id)?.state === "running");
+    const priority = await f.crew.sendAgentMessage(f.agents[0].id, f.agents[1].id, "priority-after-normal", "Newest priority work.", undefined, true);
+    await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
+    await waitFor(() => (f.crew as any).roomQueues.size === 0);
+    const state = f.store.snapshot();
+    assert.equal(state.memberTurns.find((turn) => turn.id === running.id)?.state, "cancelled");
+    assert.equal(state.memberTurns.find((turn) => turn.id === normal.turn?.id)?.state, "cancelled");
+    assert.equal(state.memberTurns.find((turn) => turn.id === priority.turn?.id)?.state, "completed");
+    assert.equal(state.messages.some((message) => message.content === "STALE_RUNNING"), false);
+    assert.equal(state.messages.some((message) => message.content === "PRIORITY_WON"), true);
+    assert.equal(f.codex.interrupts.length, 1);
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 

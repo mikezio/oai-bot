@@ -813,6 +813,7 @@ app.post("/api/agents", async (req, res, next) => {
     await mkdir(path.join(root, agent.privateWorkspacePath), { recursive: true });
     const directRoom: Room = { id: makeId(), name: agent.name, description: agent.description, agentIds: [agent.id], kind: "direct", directAgentId: agent.id, createdAt: timestamp, updatedAt: timestamp };
     store.mutate((state) => { state.agents.push(agent); state.rooms.push(directRoom); });
+    await crew.startAgentFirstRun(agent.id);
     broadcast();
     res.status(201).json(agent);
   } catch (error) {

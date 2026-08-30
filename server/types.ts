@@ -277,6 +277,8 @@ export interface MemberTurnWorkflow {
   roomSnapshot?: MemberTurnRoomSnapshot;
   peerSnapshots?: MemberTurnPeerSnapshot[];
   newMessages?: MemberTurnMessageSnapshot[];
+  /** Hidden host cue that asks a newly created Bot to open its direct chat. */
+  isFirstRun?: boolean;
   isWindingDown: boolean;
   state: MemberTurnState;
   workflowId?: string;

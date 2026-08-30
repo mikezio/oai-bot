@@ -1,7 +1,13 @@
 import type { AgentProfile } from "./types.js";
 
 export function extractMentionedAgentIds(text: string, agents: AgentProfile[]): string[] {
-  const lower = text.toLocaleLowerCase();
+  // A quoted example such as `reply @Scout` is content, not an address. The
+  // host UI can render richer mention metadata later; until then, exclude
+  // Markdown code spans and fences before applying the exact-name matcher.
+  const lower = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`\n]*`/g, " ")
+    .toLocaleLowerCase();
   return agents
     .filter((agent) => {
       const escaped = agent.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

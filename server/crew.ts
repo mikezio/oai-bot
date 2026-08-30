@@ -17,6 +17,7 @@ export class CrewOrchestrator {
   private agentLeases = new Map<string, Promise<void>>();
   private activeCycles = new Map<string, ActiveCycle>();
   private activityClearTimers = new Map<string, NodeJS.Timeout>();
+  private waitRequests = new Map<string, { question: string; messageId: string }>();
 
   constructor(private readonly store: Store, private readonly codex: CodexClient, private readonly broadcast: () => void, private readonly runtime?: RuntimeProvider) {
     codex.on("approval", (request) => this.onApproval(request));
@@ -72,7 +73,8 @@ export class CrewOrchestrator {
         { type: "function", name: "forget_memory", description: "Delete one of your own durable memories by its exact memory ID.", inputSchema: { type: "object", properties: { memoryId: { type: "string" } }, required: ["memoryId"], additionalProperties: false } },
         { type: "function", name: "update_bots", description: "Atomically update existing Bots. The result returns the exact normalized saved avatar config and whether its semantics are supported. Report only that result.", inputSchema: { type: "object", properties: { updates: { type: "array", minItems: 1, items: { type: "object", properties: botProperties, required: ["id"], additionalProperties: false } } }, required: ["updates"], additionalProperties: false } },
         { type: "function", name: "create_bot", description: "Create a persistent customizable Bot and its direct chat.", inputSchema: { type: "object", properties: { name: { type: "string" }, title: { type: "string" }, description: { type: "string" }, instructions: { type: "string" }, color: { type: "string" }, avatarShape: botProperties.avatarShape, avatarVector: botProperties.avatarVector, avatarColor: botProperties.avatarColor, avatarAccent: botProperties.avatarAccent, avatarFace: botProperties.avatarFace, avatarTexture: botProperties.avatarTexture, avatarMotion: botProperties.avatarMotion, avatarAccessory: botProperties.avatarAccessory }, required: ["name"], additionalProperties: false } },
-        { type: "function", name: "message_bot", description: "Send a first-class direct message to another Bot and request an independent turn from that Bot. Use it for assignments, questions, review requests, and handoffs.", inputSchema: { type: "object", properties: { target: { type: "string", description: "Target Bot ID or exact current name" }, text: { type: "string", description: "The direct peer message, question, feedback request, or handoff" } }, required: ["target", "text"], additionalProperties: false } },
+        { type: "function", name: "message_bot", description: "Send a first-class asynchronous direct message to another Bot and request an independent turn. Normal messages wait for the recipient's current turn. Set priority only for STOP, supersede, or genuinely time-critical instructions that should interrupt the recipient's non-user work.", inputSchema: { type: "object", properties: { target: { type: "string", description: "Target Bot ID or exact current name" }, text: { type: "string", description: "The direct peer message, question, feedback request, or handoff" }, priority: { type: "boolean", description: "Interrupt the recipient's current non-user turn before delivery. Default false." } }, required: ["target", "text"], additionalProperties: false } },
+        { type: "function", name: "wait_for_user", description: "Ask one visible question and enter a durable waiting state. Use this whenever you need the user to answer before continuing. After this succeeds, output exactly [[PASS]] and do not repeat the question in prose.", inputSchema: { type: "object", properties: { question: { type: "string", description: "The single concise question shown to the user" } }, required: ["question"], additionalProperties: false } },
         { type: "function", name: "post_to_group", description: "Post a visible update as yourself into a group you belong to. An exact @Bot mention is a public handoff and wakes that Bot; a post without an exact mention is shared context only. Use message_bot for a private handoff.", inputSchema: { type: "object", properties: { group: { type: "string", description: "Group ID or exact current group name" }, text: { type: "string", description: "Visible status, finding, question, decision, or public @Bot handoff" } }, required: ["group", "text"], additionalProperties: false } },
         { type: "function", name: "update_group", description: "Update a group name, description, or membership. Members may be Bot IDs or exact current Bot names.", inputSchema: { type: "object", properties: { id: { type: "string", description: "Group ID or exact group name" }, name: { type: "string" }, description: { type: "string" }, memberIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 6 } }, required: ["id"], additionalProperties: false } },
         { type: "function", name: "create_group", description: "Create a persistent group containing ordinary existing Bots.", inputSchema: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, memberIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 6 } }, required: ["name", "memberIds"], additionalProperties: false } }
@@ -145,6 +147,46 @@ export class CrewOrchestrator {
       this.broadcast();
       return {removed:true,memoryId};
     }
+    if (request.tool === "wait_for_user") {
+      const context = this.threadContext.get(request.threadId)!;
+      const question = String(args.question || "").trim().slice(0, 2_000);
+      if (!question) throw new Error("A question is required");
+      const state = this.store.snapshot();
+      const agent = state.agents.find((item) => item.id === context.agentId);
+      const room = state.rooms.find((item) => item.id === context.roomId);
+      if (!agent || !room) throw new Error("Bot chat not found");
+      const active = this.activeCycles.get(room.id);
+      const workflow = active ? state.memberTurns.find((turn) => turn.id === active.workflowId) : undefined;
+      const responseRoom = workflow?.originRoomId
+        ? state.rooms.find((item) => item.id === workflow.originRoomId && item.kind === "group") || room
+        : room;
+      const pending = this.waitRequests.get(request.threadId);
+      const existing = pending
+        ? state.messages.find((item) => item.id === pending.messageId)
+        : state.messages.find((item) => item.clientNonce === request.callId && item.senderId === agent.id);
+      if (existing) {
+        this.waitRequests.set(request.threadId, { question: existing.content, messageId: existing.id });
+        this.store.mutate((current) => {
+          const target = current.agents.find((item) => item.id === agent.id);
+          if (target) target.awaitingUserResponse = true;
+        });
+        return { waiting: true, duplicate: true, questionId: existing.id, question: existing.content };
+      }
+      const message = this.addMessage({
+        roomId: responseRoom.id, senderType: "agent", senderId: agent.id, fromAgentId: agent.id,
+        toAgentIds: [], content: question, kind: "message", status: "complete", mentions: [],
+        clientNonce: request.callId, reactions: {}
+      });
+      this.commitMessageToRoomMembers(message, responseRoom);
+      if (!responseRoom.agentIds.includes(agent.id)) this.commitMessageToAgent(message, agent.id);
+      this.store.mutate((current) => {
+        const target = current.agents.find((item) => item.id === agent.id);
+        if (target) target.awaitingUserResponse = true;
+      });
+      this.waitRequests.set(request.threadId, { question, messageId: message.id });
+      this.broadcast();
+      return { waiting: true, duplicate: false, questionId: message.id, question };
+    }
     if (request.tool === "message_bot") {
       const context = this.threadContext.get(request.threadId)!;
       const state = this.store.snapshot();
@@ -154,9 +196,10 @@ export class CrewOrchestrator {
       if (!room || !sender || !target || target.id === sender.id) throw new Error("Choose another Bot");
       const text = String(args.text || "").trim().slice(0, 8_000);
       if (!text) throw new Error("Peer message text is required");
-      const result = await this.sendAgentMessage(sender.id, target.id, request.callId, text, room.id);
+      const priority = args.priority === true;
+      const result = await this.sendAgentMessage(sender.id, target.id, request.callId, text, room.id, priority);
       return {
-        delivered: true, duplicate: result.duplicate,
+        delivered: true, duplicate: result.duplicate, priority,
         from: { id: sender.id, name: sender.name }, to: { id: target.id, name: target.name },
         workflowId: result.turn?.workflowId || result.turn?.id
       };
@@ -257,6 +300,7 @@ export class CrewOrchestrator {
       await mkdir(path.resolve(process.cwd(), privateWorkspacePath), { recursive: true });
       const direct: Room = { id: makeId(), name, description: agent.description, agentIds: [id], kind: "direct", directAgentId: id, createdAt: timestamp, updatedAt: timestamp };
       this.store.mutate((state) => { state.agents.push(agent); state.rooms.push(direct); });
+      await this.startAgentFirstRun(id);
       this.broadcast();
       return { bot: { id, name }, directChatId: direct.id };
     }
@@ -440,6 +484,7 @@ export class CrewOrchestrator {
     nonce: string; isWindingDown: boolean; deadlineAt?: string; rootWorkflowId?: string; parentWorkflowId?: string; originRoomId?: string;
     roomSnapshot?: MemberTurnRoomSnapshot; peerSnapshots?: MemberTurnPeerSnapshot[];
     newMessages?: MemberTurnMessageSnapshot[]; additionalPeerAgentIds?: string[];
+    isFirstRun?: boolean;
   }) {
     const duplicate = this.store.snapshot().memberTurns.find((turn) => turn.nonce === input.nonce && turn.memberAgentId === input.memberAgentId);
     if (duplicate) return duplicate;
@@ -472,6 +517,7 @@ export class CrewOrchestrator {
       requestedBy: input.requestedBy, requestedByAgentId: input.requestedByAgentId,
       triggerMessageId: input.triggerMessageId, peerAgentIds,
       newMessageIds: input.newMessageIds, roomSnapshot, peerSnapshots, newMessages,
+      isFirstRun: input.isFirstRun,
       isWindingDown: input.isWindingDown, state: "queued",
       workflowId: makeId(), rootWorkflowId, parentWorkflowId: input.parentWorkflowId, originRoomId: input.originRoomId,
       deadlineAt: input.deadlineAt || new Date(Date.now() + 10 * 60_000).toISOString(),
@@ -666,6 +712,47 @@ export class CrewOrchestrator {
     return this.cancelMemberTurn(existing.id, reason);
   }
 
+  private async cancelAgentNonUserWork(agentId: string, reason: string) {
+    const state = this.store.snapshot();
+    const interrupted = state.memberTurns.filter((turn) =>
+      turn.memberAgentId === agentId
+      && turn.requestedBy !== "user"
+      && (turn.state === "queued" || turn.state === "running")
+    );
+    if (!interrupted.length) return;
+    const ids = new Set(interrupted.map((turn) => turn.id));
+    const interrupts: Promise<unknown>[] = [];
+    for (const turn of interrupted) {
+      const active = this.activeCycles.get(turn.roomId);
+      if (active?.workflowId !== turn.id) continue;
+      active.cancelled = true;
+      if (active.activeThreadId && active.activeTurnId) {
+        interrupts.push(this.codex.interruptTurn(active.activeThreadId, active.activeTurnId).catch(() => undefined));
+      }
+    }
+    const timestamp = isoNow();
+    this.store.mutate((current) => {
+      for (const turn of current.memberTurns) {
+        if (!ids.has(turn.id) || (turn.state !== "queued" && turn.state !== "running")) continue;
+        turn.state = "cancelled";
+        turn.cancellationReason = reason;
+        turn.finishedAt = timestamp;
+        turn.updatedAt = timestamp;
+        delete turn.leaseId;
+        delete turn.recoveryRequired;
+        const receipt = current.deliveryReceipts.find((item) => item.memberTurnId === turn.id && item.kind === "member-turn");
+        if (receipt) { receipt.status = "rejected"; receipt.refusalCode = reason; receipt.updatedAt = timestamp; }
+      }
+      for (const roomId of new Set(interrupted.map((turn) => turn.roomId))) {
+        const room = current.rooms.find((item) => item.id === roomId);
+        const active = this.activeCycles.get(roomId);
+        if (room && active && ids.has(active.workflowId)) room.runState = undefined;
+      }
+    });
+    this.broadcast();
+    await Promise.allSettled([...interrupts, this.store.flush()]);
+  }
+
   async requestMemberTurn(roomId: string, memberAgentId: string, nonce: string, newMessageIds: string[] = [], isWindingDown = false, deadlineAt?: string, snapshots?: {
     room?: MemberTurnRoomSnapshot; peers?: MemberTurnPeerSnapshot[]; newMessages?: MemberTurnMessageSnapshot[];
   }) {
@@ -681,7 +768,24 @@ export class CrewOrchestrator {
     return turn;
   }
 
-  async sendAgentMessage(fromAgentId: string, toAgentId: string, messageId: string, text: string, sourceRoomId?: string) {
+  async startAgentFirstRun(agentId: string) {
+    const state = this.store.snapshot();
+    const agent = state.agents.find((item) => item.id === agentId);
+    const room = state.rooms.find((item) => item.kind === "direct" && item.directAgentId === agentId);
+    if (!agent || !room) throw new Error("Bot direct chat not found");
+    const nonce = `first-run:${agentId}`;
+    const existing = state.memberTurns.find((turn) => turn.nonce === nonce && turn.memberAgentId === agentId);
+    if (existing) return existing;
+    const turn = this.queueMemberTurn({
+      room, memberAgentId: agentId, requestedBy: "system", newMessageIds: [], nonce,
+      isWindingDown: false, isFirstRun: true
+    });
+    await this.store.flush();
+    this.enqueueRoom(room.id, () => this.drainRoom(room.id));
+    return turn;
+  }
+
+  async sendAgentMessage(fromAgentId: string, toAgentId: string, messageId: string, text: string, sourceRoomId?: string, priority = false) {
     let state = this.store.snapshot();
     const sender = state.agents.find((agent) => agent.id === fromAgentId);
     const target = state.agents.find((agent) => agent.id === toAgentId);
@@ -697,7 +801,12 @@ export class CrewOrchestrator {
     if (existing) return { message: existing, duplicate: true };
     const content = text.trim().slice(0, 8_000);
     if (!content) throw new Error("Peer message text is required");
+    if (priority) {
+      await this.cancelAgentNonUserWork(toAgentId, `Interrupted by priority message from ${sender.name}`);
+      state = this.store.snapshot();
+    }
     const message = this.addMessage({ roomId: room.id, senderType: "agent", senderId: fromAgentId, fromAgentId, toAgentIds: [toAgentId], content, kind: "peer-message", status: "complete", mentions: [toAgentId], clientNonce: messageId, reactions: {} });
+    this.commitMessageToAgent(message, fromAgentId);
     this.store.mutate((current) => {
       const recipient = current.agents.find((agent) => agent.id === toAgentId);
       if (recipient) recipient.awaitingUserResponse = false;
@@ -767,7 +876,7 @@ export class CrewOrchestrator {
       }
       const source = workflow.triggerMessageId ? snapshot.messages.find((message) => message.id === workflow.triggerMessageId) : undefined;
       const incoming = workflow.newMessages?.map((message) => `${message.speakerName}: ${message.text}`).join("\n\n")
-        || source?.content || "Continue the queued room work.";
+        || source?.content || (workflow.isFirstRun ? "Open this new direct conversation." : "Continue the queued room work.");
       const active: ActiveCycle = { id: workflow.nonce, workflowId: workflow.id, sourceMessageId: workflow.triggerMessageId || workflow.id, cancelled: false };
       this.activeCycles.set(roomId, active);
       const startedAt = isoNow();
@@ -780,7 +889,9 @@ export class CrewOrchestrator {
       });
       this.setRoomRunState(roomId, { nonce: workflow.nonce, phase: workflow.isWindingDown ? "winding-down" : "active", activeAgentId: workflow.memberAgentId, startedAt });
       if (workflow.originRoomId) this.setRoomRunState(workflow.originRoomId, { nonce: workflow.nonce, phase: workflow.isWindingDown ? "winding-down" : "active", activeAgentId: workflow.memberAgentId, startedAt });
-      const result = await this.withAgentLease(workflow.memberAgentId, () => this.runMemberTurn(workflow, incoming, workflow.triggerMessageId || workflow.id, workflow.isWindingDown ? "winding-down" : "active", active));
+      const result = await this.withAgentLease(workflow.memberAgentId, () => active.cancelled
+        ? Promise.resolve<MemberTurnResult>({ requestedAgentIds: [], awaitingUserResponse: false, passed: true })
+        : this.runMemberTurn(workflow, incoming, workflow.triggerMessageId || workflow.id, workflow.isWindingDown ? "winding-down" : "active", active));
       if (this.activeCycles.get(roomId) === active) this.activeCycles.delete(roomId);
       const persisted = this.store.snapshot().memberTurns.find((turn) => turn.id === workflow.id);
       if (active.cancelled || persisted?.state === "cancelled") continue;
@@ -897,11 +1008,11 @@ Talk to the actual people and Bots in the conversation. In a user-facing respons
 
 You have your own model turn, conversation memory, tools, and private Bot workspace. The room transcript and shared workspace are common resources, not a shared identity. Preserve other members' changes. In a Channel, an exact @Bot mention is a visible message to that Bot and wakes it. Plain names do not. Visible @Bot handoffs are the default for shared discussion, implementation, review, and verification. Use oai_bot.message_bot only for context that genuinely belongs in a private Bot-to-Bot exchange, never as the routine way to wake another member of the current Channel. ${room.kind === "group" ? `Your normal answer is already posted in ${room.name}; do not post it again with a tool.` : "When a private Bot handoff originated in a Channel, your normal answer is returned to that Channel under your own name."}
 
-${this.runtime ? "A persistent shared computer is available through oai_bot.computer_status, oai_bot.computer_doctor, and oai_bot.computer_exec. Use computer_exec for commands, builds, tests, and shared files. The native Codex shell belongs to the OAI Bot host process and is not the shared computer; do not use it for shared-computer work or claim its results came from the computer." : "No shared computer provider is configured for this OAI Bot process."}
+${this.runtime ? "Your native Codex shell runs inside the persistent shared computer at /workspace. Use it normally for commands, builds, tests, and shared files. oai_bot.computer_status, oai_bot.computer_doctor, and oai_bot.computer_exec are additional bounded runtime diagnostics. Never claim host-only paths or commands came from the shared computer." : "No shared computer provider is configured for this OAI Bot process."}
 
 Use oai_bot tools when a request actually changes Bots, Channels, memory, or another Bot's work. Save a memory only when the user clearly establishes something lasting across conversations. Report only confirmed changes. Never pretend prose changed persistent state. For avatars, do not claim a custom abstract silhouette is a recognizable object or animal unless the tool confirms semanticVerified. The character itself is the avatar, never an icon placed inside a generic shape.
 
-If you have nothing relevant to add, output exactly [[PASS]]. If you need the user before continuing, end with [[WAIT_FOR_USER]]. Do not use em dashes. Do not perform destructive, public, account, billing, or external side effects without approval.`;
+If you have nothing relevant to add, output exactly [[PASS]]. If you need the user before continuing, call oai_bot.wait_for_user with one concise question, then output exactly [[PASS]]. The legacy [[WAIT_FOR_USER]] marker is still accepted but the tool is authoritative. Do not use em dashes. Do not perform destructive, public, account, billing, or external side effects without approval.`;
   }
 
   private transcript(agent: AgentProfile, workflow: MemberTurnWorkflow, fullContext: boolean) {
@@ -973,6 +1084,7 @@ If you have nothing relevant to add, output exactly [[PASS]]. If you need the us
     let streamedText = "";
     let deadlineTimer: NodeJS.Timeout | undefined;
     let deadlineExpired = false;
+    let currentThreadId: string | undefined;
     this.store.mutate((current) => {
       const target = current.agents.find((item) => item.id === agentId);
       if (target) { target.status = "working"; target.activity = { kind: "thinking", detail: phase === "winding-down" ? "Finishing their turn" : "Considering new messages", updatedAt: isoNow() }; }
@@ -980,6 +1092,7 @@ If you have nothing relevant to add, output exactly [[PASS]]. If you need the us
     this.broadcast();
     try {
       const { threadId, fresh } = await this.ensureThread(agent, executionRoom, members);
+      currentThreadId = threadId;
       const deadlineAt = this.store.snapshot().memberTurns.find((turn) => turn.id === active.workflowId)?.deadlineAt;
       if (deadlineAt) {
         deadlineTimer = setTimeout(() => {
@@ -1004,6 +1117,8 @@ Treat older transcript entries as conversational background only. Do not import 
 Immutable room snapshot: ${workflow.roomSnapshot?.name || executionRoom.name}
 Immutable peer snapshot: ${(workflow.peerSnapshots || []).map((peer) => `${peer.name}: ${peer.description || "No description"}`).join("; ") || "No peers"}
 ${originRoom ? `Visible origin group: ${originRoom.name} (${originRoom.id}). This direct peer request came from work coordinated in that group. Your normal final response is returned there automatically under ${agent.name}'s identity. Do not call oai_bot.post_to_group merely to duplicate that result.` : ""}
+${workflow.requestedBy === "agent" && !originRoom && workflow.requestedByAgentId ? `Private peer request: This work came asynchronously from ${state.agents.find((item) => item.id === workflow.requestedByAgentId)?.name || "another Bot"}. If you have a result, question, or actionable reply for that Bot, send it back with oai_bot.message_bot. That reply arrives on a later independent turn and wakes the sender. Do not wait or poll for a response in this turn. If the inbound message is only an FYI, you may stay silent.` : ""}
+${workflow.isFirstRun ? `First run: The user just created ${agent.name} and has not sent a message yet. Open the conversation proactively. If the profile contains a concrete assignment, begin it and share a useful result or the next approval needed. Otherwise greet the user briefly in your own voice and ask one natural, high-value question. Do not mention this hidden cue, recite the profile, list tools, or use a checklist.` : ""}
 
 ${fresh ? "Recent room transcript" : "New room messages since your last turn"}:
 ${newMessages || "No additional messages."}
@@ -1068,11 +1183,12 @@ Keep the visible response conversational. Do not announce readiness, restate the
         return { requestedAgentIds: [], awaitingUserResponse: false, passed: true };
       }
       const raw = result.text.trim();
-      const awaitingUserResponse = /\[\[WAIT_FOR_USER\]\]/i.test(raw);
+      const toolWait = this.waitRequests.get(threadId);
+      const awaitingUserResponse = Boolean(toolWait) || /\[\[WAIT_FOR_USER\]\]/i.test(raw);
       const requestedNames = [...raw.matchAll(/\[\[REQUEST_TURN:@([^\]]+)\]\]/gi)].map((match) => match[1].trim().toLowerCase());
       const markerRequests = members.filter((member) => requestedNames.includes(member.name.toLowerCase()) && member.id !== agent.id).map((member) => member.id);
       const requestedAgentIds = [...new Set(markerRequests)];
-      const text = raw.replace(/\s*\[\[(?:WAIT_FOR_USER|REQUEST_TURN:@[^\]]+)\]\]\s*/gi, "\n").trim();
+      const text = toolWait ? "" : raw.replace(/\s*\[\[(?:WAIT_FOR_USER|REQUEST_TURN:@[^\]]+)\]\]\s*/gi, "\n").trim();
       const latest = this.store.snapshot().messages.filter((message) => message.roomId === room.id).at(-1)?.id;
       if (awaitingUserResponse) this.store.mutate((current) => { const target = current.agents.find((item) => item.id === agent.id); if (target) target.awaitingUserResponse = true; });
       if (!text || /^\[\[PASS\]\][.!]?$/i.test(text)) {
@@ -1120,6 +1236,7 @@ Keep the visible response conversational. Do not announce readiness, restate the
       this.commitMessageToAgent(failure, agent.id);
       return { requestedAgentIds: [], awaitingUserResponse: false, passed: false, error: String(error) };
     } finally {
+      if (currentThreadId) this.waitRequests.delete(currentThreadId);
       if (deadlineTimer) clearTimeout(deadlineTimer);
       const activityTimer = this.activityClearTimers.get(agentId);
       if (activityTimer) { clearTimeout(activityTimer); this.activityClearTimers.delete(agentId); }
@@ -1238,6 +1355,7 @@ Keep the visible response conversational. Do not announce readiness, restate the
       ,computer_status: "Checking the shared computer"
       ,computer_doctor: "Checking computer health"
       ,computer_exec: "Using the shared computer"
+      ,wait_for_user: "Waiting for your answer"
     };
     const callId = String(params.callId || "");
     if (phase === "started") {

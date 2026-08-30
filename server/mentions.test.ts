@@ -27,6 +27,8 @@ const agents: AgentProfile[] = [
 test("extracts case-insensitive mentions without partial matches", () => {
   assert.deepEqual(extractMentionedAgentIds("@ATLAS ask @Scout, please", agents), ["atlas", "scout"]);
   assert.deepEqual(extractMentionedAgentIds("email@atlas.example", agents), []);
+  assert.deepEqual(extractMentionedAgentIds("@Atlas reply exactly `handoff @Scout`", agents), ["atlas"]);
+  assert.deepEqual(extractMentionedAgentIds("@Atlas inspect:\n```text\n@Scout is an example\n```", agents), ["atlas"]);
 });
 
 test("sanitizes names", () => {
