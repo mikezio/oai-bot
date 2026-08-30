@@ -562,14 +562,6 @@ select:focus-visible {
   margin: 0 0 18px;
   align-items: flex-start;
   position: relative;
-  animation: message-in var(--motion-normal) var(--ease-out);
-}
-
-@keyframes message-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
 }
 
 .message-row.user {
@@ -786,7 +778,6 @@ select:focus-visible {
   margin: -4px 0 16px;
   color: var(--muted);
   font-size: 13px;
-  animation: message-in var(--motion-normal) var(--ease-out);
 }
 
 .activity-agent-mark {
@@ -1257,7 +1248,6 @@ select:focus-visible {
   padding: 14px;
   margin: 8px 0 18px;
   color: var(--warning);
-  animation: message-in var(--motion-normal) var(--ease-out);
 }
 
 .approval-card > div { flex: 1; min-width: 0; }
@@ -1473,11 +1463,10 @@ select:focus-visible {
 }
 
 .eyebrow {
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  font-size: 13px;
   color: var(--muted);
-  font-weight: 600;
-  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 
 .conversation-details section {
@@ -2380,8 +2369,6 @@ select:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .avatar-mark *,
   .activity-agent-mark *,
-  .message-row,
-  .activity-line,
   .jump-to-latest,
   .bot-context-menu,
   .conversation-details,
