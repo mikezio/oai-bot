@@ -499,6 +499,23 @@ test("message_bot persists a peer receipt and durable targeted handoff", async (
   } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
 });
 
+test("a direct private peer handoff makes the peer message the recipient's immediate task", async () => {
+  const f = await fixture(["[[PASS]]", "PRIVATE_PEER_OK"]);
+  try {
+    await f.crew.postUserMessage(f.direct.id, "Privately ask Two to verify this.");
+    await waitFor(() => f.codex.calls.length === 1 && f.codex.active === 0);
+    const threadId = f.store.snapshot().agents[0].roomThreadIds[f.direct.id];
+    await (f.codex as any).dynamicToolHandler({
+      threadId, turnId: "direct-peer-turn", callId: "direct-peer-call", namespace: "oai_bot", tool: "message_bot",
+      arguments: { target: "Two", text: "Return PRIVATE_PEER_OK" }
+    });
+    await waitFor(() => f.codex.calls.length === 2 && f.codex.active === 0);
+    assert.match(f.codex.calls[1].prompt, /Current workflow request \(authoritative scope\):\nReturn PRIVATE_PEER_OK/);
+    assert.doesNotMatch(f.codex.calls[1].prompt, /Current workflow request \(authoritative scope\):\nPrivately ask Two/);
+    assert.equal(f.store.snapshot().messages.at(-1)?.content, "PRIVATE_PEER_OK");
+  } finally { await f.store.flush(); await rm(f.directory, { recursive: true, force: true }); }
+});
+
 test("post_to_group creates a visible group update without waking the roster", async () => {
   const f = await fixture(["[[PASS]]"]);
   try {

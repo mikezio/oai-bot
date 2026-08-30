@@ -963,6 +963,8 @@ If you have nothing relevant to add, output exactly [[PASS]]. If you need the us
     const responseRoom = originRoom || room;
     const rootWorkflow = state.memberTurns.find((item) => item.id === (workflow.rootWorkflowId || workflow.id)) || workflow;
     const rootMessage = rootWorkflow.triggerMessageId ? state.messages.find((item) => item.id === rootWorkflow.triggerMessageId) : undefined;
+    const triggerMessage = workflow.triggerMessageId ? state.messages.find((item) => item.id === workflow.triggerMessageId) : undefined;
+    const workflowRequest = workflow.requestedBy === "agent" ? triggerMessage : rootMessage;
     let streamingMessageId: string | undefined;
     let streamedText = "";
     let deadlineTimer: NodeJS.Timeout | undefined;
@@ -989,7 +991,9 @@ Trigger message: ${sourceMessageId}
 Newest incoming text: ${incoming}
 
 Current workflow request (authoritative scope):
-${rootMessage?.content || incoming}
+${workflowRequest?.content || incoming}
+
+${originRoom && rootMessage && rootMessage.id !== workflowRequest?.id ? `Higher-level user request (context and constraint, not the peer's immediate task):\n${rootMessage.content}\n` : ""}
 
 Treat older transcript entries as conversational background only. Do not import requirements, decisions, or acceptance criteria from an earlier request unless the current workflow request or a handoff in this workflow explicitly carries them forward.
 
