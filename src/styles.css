@@ -24,6 +24,8 @@ body,
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
@@ -31,6 +33,19 @@ body {
   position: fixed;
   inset: 0;
   touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.agent-copy,
+.bubble,
+.file-preview pre,
+.channel-description {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 button,
@@ -1967,8 +1982,21 @@ select:focus-visible {
   border: 0.5px solid var(--line);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   box-shadow: var(--shadow-lg);
-  animation: sheet-up-modal var(--motion-normal) var(--ease-out);
+  animation: sheet-up-modal var(--motion-normal) var(--ease-ios);
   padding-bottom: env(safe-area-inset-bottom);
+}
+
+.sheet-grabber {
+  display: none;
+  justify-content: center;
+  padding: 8px 0 0;
+}
+
+.sheet-grabber span {
+  width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line-strong);
 }
 
 @keyframes sheet-up-modal {
@@ -2419,7 +2447,7 @@ select:focus-visible {
     width: 100%;
     height: 100%;
     border: 0;
-    transition: transform var(--motion-normal) var(--ease-out);
+    transition: transform var(--motion-normal) var(--ease-ios);
     will-change: transform;
   }
 
@@ -2440,16 +2468,18 @@ select:focus-visible {
   }
 
   .shell.mobile-chat-open .sidebar {
-    transform: translateX(-28%);
+    transform: translateX(calc(-22% + (var(--swipe-x, 0px) * 0.22)));
   }
 
   .shell.mobile-chat-open .chat {
-    transform: translateX(0);
+    transform: translateX(var(--swipe-x, 0px));
     pointer-events: auto;
     visibility: visible;
-    box-shadow: var(--shadow-lg);
+    box-shadow: -8px 0 28px rgb(0 0 0 / 0.18);
   }
 
+  .shell.nav-dragging .sidebar,
+  .shell.nav-dragging .chat,
   .shell.nav-instant .sidebar,
   .shell.nav-instant .chat {
     transition: none;
@@ -2464,20 +2494,37 @@ select:focus-visible {
     padding-right: 16px;
   }
 
+  .brand strong {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+  }
+
   .side-section {
     padding-left: 10px;
     padding-right: 10px;
   }
 
   .chat-link {
-    min-height: 68px;
+    min-height: 70px;
     padding: 12px;
+    border-radius: 0;
+  }
+
+  .chat-link:active {
+    background: var(--surface-active);
+  }
+
+  .chat-link.active {
+    background: var(--sidebar-active);
+    box-shadow: none;
   }
 
   .chat-header {
     min-height: calc(52px + env(safe-area-inset-top));
     padding-left: 4px;
     padding-right: 4px;
+    background: color-mix(in srgb, var(--canvas) 78%, transparent);
   }
 
   .header-title {
@@ -2515,7 +2562,13 @@ select:focus-visible {
 
   .bubble {
     max-width: 82vw;
-    font-size: 16px;
+    font-size: 17px;
+    line-height: 1.35;
+  }
+
+  .agent-copy {
+    font-size: 17px;
+    line-height: 1.4;
   }
 
   .peer-exchange {
@@ -2524,7 +2577,7 @@ select:focus-visible {
   }
 
   .message-actions {
-    opacity: 0.7;
+    opacity: 0.85;
   }
 
   .reaction-picker {
@@ -2537,16 +2590,36 @@ select:focus-visible {
   }
 
   .composer-wrap {
-    padding: 6px 10px max(10px, env(safe-area-inset-bottom));
-    background: var(--canvas);
+    padding: 4px 8px max(8px, calc(env(safe-area-inset-bottom) + var(--keyboard-inset, 0px)));
+    background: color-mix(in srgb, var(--canvas) 92%, transparent);
+    backdrop-filter: saturate(180%) blur(16px);
+    -webkit-backdrop-filter: saturate(180%) blur(16px);
+    border-top: 0.5px solid var(--line-soft);
   }
 
   .composer {
-    border-radius: var(--radius-md);
+    border-radius: 20px;
+    border-color: var(--line);
+    background: var(--surface-raised);
+    box-shadow: none;
+    padding: 4px 4px 4px 6px;
+  }
+
+  .composer:focus-within {
+    box-shadow: none;
+    border-color: var(--line-strong);
   }
 
   .composer textarea {
-    font-size: 16px;
+    font-size: 17px;
+    min-height: 36px;
+    padding: 8px 6px;
+  }
+
+  .composer .attach-button,
+  .composer button:not(.attach-button) {
+    width: 36px;
+    height: 36px;
   }
 
   .mention-menu {
@@ -2554,15 +2627,22 @@ select:focus-visible {
     width: 100%;
   }
 
+  .sheet-grabber {
+    display: flex;
+  }
+
   .conversation-details,
   .workspace-panel {
     width: 100vw;
     border-left: 0;
-    animation: sheet-up-modal var(--motion-normal) var(--ease-out);
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    top: 8vh;
+    height: auto;
+    animation: sheet-up-modal var(--motion-normal) var(--ease-ios);
   }
 
   .jump-to-latest {
-    bottom: calc(76px + env(safe-area-inset-bottom));
+    bottom: calc(72px + env(safe-area-inset-bottom) + var(--keyboard-inset, 0px));
   }
 
   .form-grid,

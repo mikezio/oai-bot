@@ -1,4 +1,4 @@
-import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState, type CSSProperties, type TouchEvent as ReactTouchEvent } from "react";
 import { ArrowDown, ArrowLeft, Bot, Check, ChevronDown, CircleStop, Clock3, Files, LoaderCircle, MessageCircleReply, Monitor, Moon, Paperclip, Play, Plus, RefreshCw, Send, Settings2, ShieldAlert, SmilePlus, Sun, Trash2, Users, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { AvatarMark, type AvatarVectorSpec } from "./AvatarMark";
@@ -108,26 +108,45 @@ export function App() {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [newActivityBelow, setNewActivityBelow] = useState(false);
   const [composerHeight, setComposerHeight] = useState(40);
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const [swipeDragging, setSwipeDragging] = useState(false);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const markingReadRef = useRef(new Set<string>());
   const navInstantRef = useRef(true);
+  const swipeRef = useRef<{active:boolean;startX:number;startY:number;locked:"h"|"v"|null}>({active:false,startX:0,startY:0,locked:null});
+  const mobileChatOpenRef = useRef(mobileChatOpen);
+  mobileChatOpenRef.current = mobileChatOpen;
+
+  function isPhoneNav() {
+    return window.matchMedia("(max-width: 720px)").matches;
+  }
 
   function openChat(id: string) {
     setRoomId(id);
     setReplyTo(null);
     setDetailsOpen(false);
     setFilesOpen(false);
+    setSwipeOffset(0);
     setMobileChatOpen(true);
     navInstantRef.current = false;
+    if (isPhoneNav() && window.history.state?.oaiScreen !== "chat") {
+      window.history.pushState({oaiScreen:"chat",roomId:id}, "");
+    }
   }
 
   function closeChat() {
+    navInstantRef.current = false;
+    setSwipeOffset(0);
+    setSwipeDragging(false);
+    if (isPhoneNav() && window.history.state?.oaiScreen === "chat") {
+      window.history.back();
+      return;
+    }
     setMobileChatOpen(false);
     setDetailsOpen(false);
     setFilesOpen(false);
-    navInstantRef.current = false;
   }
 
   function resizeComposer(value = draft) {
@@ -268,11 +287,29 @@ export function App() {
   }, [draft]);
 
   useEffect(() => {
+    if (!window.history.state) window.history.replaceState({oaiScreen:"list"}, "");
+    const onPop = () => {
+      if (!isPhoneNav()) return;
+      if (modal) { setModal(null); return; }
+      if (filesOpen) { setFilesOpen(false); return; }
+      if (detailsOpen) { setDetailsOpen(false); return; }
+      setMobileChatOpen(false);
+      setDetailsOpen(false);
+      setFilesOpen(false);
+      setSwipeOffset(0);
+      setSwipeDragging(false);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [modal, filesOpen, detailsOpen]);
+
+  useEffect(() => {
     const viewport = window.visualViewport;
     if (!viewport) return;
     const sync = () => {
       const inset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
       document.documentElement.style.setProperty("--keyboard-inset", `${inset}px`);
+      document.documentElement.style.setProperty("--vv-offset", `${viewport.offsetTop}px`);
     };
     sync();
     viewport.addEventListener("resize", sync);
@@ -281,6 +318,7 @@ export function App() {
       viewport.removeEventListener("resize", sync);
       viewport.removeEventListener("scroll", sync);
       document.documentElement.style.removeProperty("--keyboard-inset");
+      document.documentElement.style.removeProperty("--vv-offset");
     };
   }, []);
 
@@ -291,6 +329,48 @@ export function App() {
     });
     return () => cancelAnimationFrame(frame);
   }, [roomId]);
+
+  function onChatTouchStart(event: ReactTouchEvent) {
+    if (!isPhoneNav() || !mobileChatOpen || detailsOpen || filesOpen || modal) return;
+    const touch = event.touches[0];
+    if (touch.clientX > 28) return;
+    swipeRef.current = {active:true,startX:touch.clientX,startY:touch.clientY,locked:null};
+    setSwipeDragging(true);
+  }
+
+  function onChatTouchMove(event: ReactTouchEvent) {
+    const swipe = swipeRef.current;
+    if (!swipe.active) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - swipe.startX;
+    const dy = touch.clientY - swipe.startY;
+    if (!swipe.locked) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      swipe.locked = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
+      if (swipe.locked === "v") {
+        swipe.active = false;
+        setSwipeDragging(false);
+        setSwipeOffset(0);
+        return;
+      }
+    }
+    if (swipe.locked !== "h") return;
+    event.preventDefault();
+    setSwipeOffset(Math.max(0, Math.min(window.innerWidth, dx)));
+  }
+
+  function onChatTouchEnd() {
+    const swipe = swipeRef.current;
+    if (!swipe.active && !swipeDragging) return;
+    const shouldClose = swipeOffset > window.innerWidth * 0.28;
+    swipeRef.current = {active:false,startX:0,startY:0,locked:null};
+    setSwipeDragging(false);
+    if (shouldClose) {
+      closeChat();
+    } else {
+      setSwipeOffset(0);
+    }
+  }
 
   async function send() {
     if (!canSend) return;
@@ -344,7 +424,7 @@ export function App() {
     setNewActivityBelow(false);
   }
 
-  return <div className={`shell ${mobileChatOpen?"mobile-chat-open":""} ${navInstantRef.current?"nav-instant":""}`}>
+  return <div className={`shell ${mobileChatOpen?"mobile-chat-open":""} ${navInstantRef.current?"nav-instant":""} ${swipeDragging?"nav-dragging":""}`} style={{"--swipe-x":`${swipeOffset}px`} as CSSProperties}>
     <aside className="sidebar">
       <div className="brand"><div className="brandmark"><Bot size={18}/></div><div><strong>OAI Bot</strong><span>AI teammates</span></div></div>
       <section className="side-section grow">
@@ -357,7 +437,13 @@ export function App() {
       <Account account={state.account} version={state.appVersion} onRefresh={async()=>{const next=await request("/api/account/refresh",{method:"POST"});setState(s=>({...s,account:next}))}} />
     </aside>
 
-    <main className={`chat ${detailsOpen?"details-visible":""}`}>
+    <main
+      className={`chat ${detailsOpen?"details-visible":""}`}
+      onTouchStart={onChatTouchStart}
+      onTouchMove={onChatTouchMove}
+      onTouchEnd={onChatTouchEnd}
+      onTouchCancel={onChatTouchEnd}
+    >
       <header className="chat-header">
         <button type="button" className="mobile-back" title="Back to chats" onClick={closeChat}><ArrowLeft size={22}/></button>
         <button type="button" className="header-title" onClick={()=>room&&setDetailsOpen(value=>!value)} title={room?"Open conversation info":undefined}>{room?.kind==="direct"&&roomAgents[0]?<Avatar agent={roomAgents[0]}/>:<span className="group-avatar"><Users size={16}/></span>}<span><h1>{room?.name || "Choose a Bot or Channel"}</h1><p>{room?.runState?.phase==="waiting"?"Waiting for you":room?.kind==="group"?`${roomAgents.length} Bots`:room?.description}</p></span></button>
@@ -597,6 +683,7 @@ function Modal({title,onClose,children}:{title:string;onClose:()=>void;children:
   },[]);
   return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)onClose()}} role="presentation">
     <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="sheet-grabber" aria-hidden="true"><span/></div>
       <header><h2>{title}</h2><button type="button" onClick={onClose} aria-label="Close"><X size={20}/></button></header>
       {children}
     </div>
