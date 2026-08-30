@@ -1,6 +1,6 @@
 {
   "name": "oai-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "An unofficial, community-built multi-agent workspace powered by Codex and a ChatGPT subscription.",
   "license": "MIT",
