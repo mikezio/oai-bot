@@ -34,9 +34,9 @@
     "start": "tsx server/index.ts --production"
   },
   "dependencies": {
-    "better-sqlite3": "^12.10.1",
+    "better-sqlite3": "^12.11.1",
     "express": "^5.1.0",
-    "lucide-react": "^0.468.0",
+    "lucide-react": "^0.577.0",
     "motion": "^13.1.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
