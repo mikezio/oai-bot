@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible problem in the server, UI, setup, or persistence.
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Say what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include the shortest sequence that reproduces the problem.
+      placeholder: "1. Create…\n2. Open…\n3. Send…"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "Windows 11, Node 20.18, Codex 0.x, Chrome 130"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Useful evidence
+      description: Paste a short sanitized log or add screenshots. Remove names, account data, tokens, private prompts, and personal files.

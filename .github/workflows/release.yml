@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - uses: actions/checkout@v4
+        if: ${{ steps.release.outputs.release_created }}
+      - uses: actions/setup-node@v4
+        if: ${{ steps.release.outputs.release_created }}
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+        if: ${{ steps.release.outputs.release_created }}
+      - run: npm run check
+        if: ${{ steps.release.outputs.release_created }}
+      - name: Build release bundles
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          bundle="oai-bot-${RELEASE_TAG}"
+          mkdir "$bundle"
+          cp -R dist server scripts "$bundle/"
+          cp package.json package-lock.json README.md LICENSE SECURITY.md .env.example start.command "$bundle/"
+          tar -czf "$bundle.tar.gz" "$bundle"
+          zip -qr "$bundle.zip" "$bundle"
+      - name: Attach runnable source bundles
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh release upload "$RELEASE_TAG" "oai-bot-${RELEASE_TAG}.tar.gz" "oai-bot-${RELEASE_TAG}.zip" --clobber

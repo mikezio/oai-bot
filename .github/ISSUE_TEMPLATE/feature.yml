@@ -1,0 +1,24 @@
+name: Feature idea
+description: Propose an improvement and explain the actual workflow it unlocks.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What are you trying to do?
+      description: Start with the user or Bot workflow, not the proposed implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested direction
+      description: Describe a possible design, alternatives, or prior art if you have one.
+  - type: textarea
+    id: success
+    attributes:
+      label: What would make it successful?
+      description: Give a concrete example or acceptance check.
+    validations:
+      required: true

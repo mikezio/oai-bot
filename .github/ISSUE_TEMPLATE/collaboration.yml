@@ -1,0 +1,33 @@
+name: Bot collaboration problem
+description: Show a room where routing, identity, handoffs, silence, or stopping behavior felt wrong.
+title: "collaboration: "
+labels: [collaboration]
+body:
+  - type: textarea
+    id: bots
+    attributes:
+      label: Bots and roles
+      description: List each Bot's role and the relevant part of its custom instructions. Remove private details.
+    validations:
+      required: true
+  - type: textarea
+    id: transcript
+    attributes:
+      label: Conversation sequence
+      description: Include the user message and replies in order. A sanitized copy is better than a summary.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened?
+      description: Explain which Bot should have responded, handed off, disagreed, waited, or stopped and why.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "macOS 15, Node 20.18, Codex 0.x, Safari mobile"
+    validations:
+      required: true

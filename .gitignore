@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+.vite/
+
+# Local runtime state and transcripts
+data/
+agent-workspaces/
+shared-workspace/
+test-artifacts-archive/
+.attachments/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Logs and operating-system files
+*.log
+*.tgz
+*.tar.gz
+*.zip
+.DS_Store
